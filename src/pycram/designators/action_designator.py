@@ -5,7 +5,7 @@ from typing import List, Optional, Any, Tuple, Union
 
 import sqlalchemy.orm
 
-from .location_designator import CostmapLocation
+from .location_designator import CostmapLocation, LocationDesignatorDescription
 from .motion_designator import *
 from .object_designator import ObjectDesignatorDescription, BelieveObject, ObjectPart
 from ..orm.action_designator import (ParkArmsAction as ORMParkArmsAction, NavigateAction as ORMNavigateAction,
@@ -344,6 +344,16 @@ class PickUpAction(ActionDesignatorDescription):
 
         return self.Action(obj_desig, self.arms[0], self.grasps[0])
 
+    def __iter__(self):
+        """
+        Iterates over all possible values for this designator and returns a performable action designator with the value.
+
+        :return: A performable action designator
+        """
+        for grasp in self.grasps:
+            for arm in self.arms:
+                yield self.Action(self.object_designator_description.ground(), arm, grasp)
+
 
 class PlaceAction(ActionDesignatorDescription):
     """
@@ -448,6 +458,7 @@ class NavigateAction(ActionDesignatorDescription):
             return ORMNavigateAction()
 
         def insert(self, session, *args, **kwargs) -> ORMNavigateAction:
+
             # initialize position and orientation
             position = Position(*self.target_location.position_as_list())
             orientation = Quaternion(*self.target_location.orientation_as_list())
@@ -487,6 +498,72 @@ class NavigateAction(ActionDesignatorDescription):
         :return: A performable designator
         """
         return self.Action(self.target_locations[0])
+
+    def __iter__(self):
+        """
+        Samples new poses from the given target location description.
+
+        :return: A performable designator
+        """
+        for pose in self.target_locations:
+            yield self.Action(pose)
+
+# class NavigateAction(ActionDesignatorDescription):
+#     """
+#     Navigates the Robot to a position.
+#     """
+#
+#     target_location: LocationDesignatorDescription.Location
+#
+#
+#     @dataclasses.dataclass
+#     class Action(ActionDesignatorDescription.Action):
+#         target_pose: Pose
+#         """
+#         Location to which the robot should be navigated
+#         """
+#
+#         @with_tree
+#         def perform(self) -> None:
+#             # ParkArmsAction.Action(Arms.BOTH).perform()
+#             MoveMotion(self.target_pose).resolve().perform()
+#
+#     def __init__(self, target_location_description: LocationDesignatorDescription, resolver=None):
+#         """
+#         Navigates the robot to a location.
+#
+#         :param target_location_description: Description of the target location for the navigation.
+#         :param resolver: An alternative resolver that creates a performable designator from the list of possible parameter
+#         """
+#         super(NavigateAction, self).__init__(resolver)
+#         self.target_location_description: LocationDesignatorDescription = target_location_description
+#         self.target_location = self.target_location_description.ground()
+#
+#     def ground(self) -> Action:
+#         """
+#         Default resolver that returns a performable designator with the first entry of possible target locations.
+#
+#         :return: A performable designator
+#         """
+#         return self.Action(self.target_location.pose)
+#
+#     def __iter__(self):
+#         """
+#         Initializes the location generator.
+#
+#         :return: This action description as iterator.
+#         """
+#         self.target_location_generator = iter(self.target_location_description)
+#         yield self
+#
+#     def __next__(self):
+#         """
+#         Picks the next target location for this action.
+#
+#         :return: This action description with the next solution.
+#         """
+#         self.target_location = next(self.target_location_generator)
+#         yield self
 
 
 class TransportAction(ActionDesignatorDescription):

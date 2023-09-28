@@ -6,7 +6,7 @@ import numpy as np
 import time
 import pybullet as p
 
-from ..plan_failures import EnvironmentManipulationImpossible
+from ..plan_failures import EnvironmentManipulationImpossible, NavigationGoalInCollision
 from ..robot_descriptions import robot_description
 from ..process_module import ProcessModule, ProcessModuleManager
 from ..bullet_world import BulletWorld, Object
@@ -16,6 +16,7 @@ from ..helper import _transform_to_torso, _apply_ik, calculate_wrist_tool_offset
 from ..local_transformer import LocalTransformer
 from ..designators.motion_designator import *
 from ..enums import JointType
+from ..bullet_world_reasoning import contact
 
 
 def _park_arms(arm):
@@ -42,6 +43,11 @@ class Pr2Navigation(ProcessModule):
     def _execute(self, desig: MoveMotion.Motion):
         robot = BulletWorld.robot
         robot.set_pose(desig.target)
+        time.sleep(0.5)
+        robot = BulletWorld.robot
+        environment = BulletWorld.current_bullet_world.get_objects_by_name(name="apartment")[0]
+        if contact(robot, environment):
+            raise NavigationGoalInCollision
 
 
 class Pr2PickUp(ProcessModule):

@@ -44,6 +44,10 @@ class Location(LocationDesignatorDescription):
         """
         return self.Location(self.pose)
 
+    def __iter__(self):
+        yield self
+        raise StopIteration
+
 
 # TODO Maybe delete this
 class ObjectRelativeLocation(LocationDesignatorDescription):

@@ -572,6 +572,9 @@ class LocationDesignatorDescription(DesignatorDescription):
         """
         raise NotImplementedError(f"{type(self)}.ground() is not implemented.")
 
+    def __iter__(self):
+        yield self
+
 
 class ObjectDesignatorDescription(DesignatorDescription):
     """
