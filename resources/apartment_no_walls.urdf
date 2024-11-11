@@ -50,7 +50,8 @@
   </link>
   <!-- Collision okay Walls -->
   <!-- From the door side being wall 1, turn right and count the walls. -->
-  <!-- NO WALLS
+  
+  <!--
   <joint name="wall_coloksu_wall1_joint" type="fixed">
     <origin rpy="0 0 -1.57" xyz="0.6 -1.615 1.53"/>
     <parent link="furnitures_root"/>
@@ -103,13 +104,17 @@
       </geometry>
     </collision>
   </link>
+  -->
+
+
   <joint name="wardrobe_joint" type="fixed">
     <origin rpy="0 0 0" xyz="9.7082 -0.6331 0.0"/>
     <parent link="furnitures_root"/>
     <child link="wardrobe"/>
   </joint>
 
-  NO WALLS-->
+  
+
   <link name="wardrobe">
     <visual>
       <geometry>
