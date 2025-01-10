@@ -41,6 +41,7 @@ from ..orm.base import Pose as ORMPose
 from ..orm.object_designator import Object as ORMObject
 from ..orm.action_designator import Action as ORMAction
 from dataclasses import dataclass, field
+import pycram.designators.specialized_designators.generated_plan.action_generator as gen
 
 
 class MoveTorsoAction(ActionDesignatorDescription):
@@ -344,6 +345,7 @@ class TransportAction(ActionDesignatorDescription):
             else self.object_designator_description.resolve()
 
         return TransportActionPerformable(obj_desig, self.arms[0], self.target_locations[0])
+        return GeneratedActionPerformable(obj_desig, self.arms[0], self.target_locations[0])
 
 
 class LookAtAction(ActionDesignatorDescription):
@@ -882,6 +884,19 @@ class TransportActionPerformable(ActionAbstract):
         NavigateActionPerformable(place_loc.pose).perform()
         PlaceActionPerformable(self.object_designator, self.arm, self.target_location).perform()
         ParkArmsActionPerformable(Arms.BOTH).perform()
+
+
+@dataclass
+class GeneratedActionPerformable(TransportActionPerformable):
+    @with_tree
+    def perform(self) -> None:
+        code = gen.generate_perform_for_action("TransportActionPerformable")
+        for expr in code:
+            print(expr)
+            try:
+                exec(expr)
+            except Exception as e:
+                print(e)
 
 
 @dataclass
