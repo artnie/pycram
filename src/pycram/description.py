@@ -1,34 +1,39 @@
 from __future__ import annotations
 
 import logging
+import os
 import pathlib
 from abc import ABC, abstractmethod
 
-import rospy
-from geometry_msgs.msg import Point, Quaternion
-from typing_extensions import Tuple, Union, Any, List, Optional, Dict, TYPE_CHECKING
+from trimesh.parent import Geometry3D
 
+from .ros.data_types import Time
+import trimesh
+from geometry_msgs.msg import Point, Quaternion
+from typing_extensions import Tuple, Union, Any, List, Optional, Dict, TYPE_CHECKING, Self, deprecated
+
+from .datastructures.dataclasses import JointState, AxisAlignedBoundingBox, Color, LinkState, VisualShape, \
+    MeshVisualShape, RotatedBoundingBox
 from .datastructures.enums import JointType
-from .local_transformer import LocalTransformer
 from .datastructures.pose import Pose, Transform
-from .datastructures.world import WorldEntity
-from .datastructures.dataclasses import JointState, AxisAlignedBoundingBox, Color, LinkState, VisualShape
+from .datastructures.world_entity import WorldEntity
+from .failures import ObjectDescriptionNotFound, LinkHasNoGeometry, LinkGeometryHasNoMesh
+from .local_transformer import LocalTransformer
 
 if TYPE_CHECKING:
     from .world_concepts.world_object import Object
 
 
 class EntityDescription(ABC):
-
     """
-    A class that represents a description of an entity. This can be a link, joint or object description.
+    A description of an entity. This can be a link, joint or object description.
     """
 
     @property
     @abstractmethod
     def origin(self) -> Pose:
         """
-        Returns the origin of this entity.
+        :return: the origin of this entity.
         """
         pass
 
@@ -36,24 +41,25 @@ class EntityDescription(ABC):
     @abstractmethod
     def name(self) -> str:
         """
-        Returns the name of this entity.
+        :return: the name of this entity.
         """
         pass
 
 
 class LinkDescription(EntityDescription):
     """
-    A class that represents a link description of an object.
+    A link description of an object.
     """
 
-    def __init__(self, parsed_link_description: Any):
+    def __init__(self, parsed_link_description: Any, mesh_dir: Optional[str] = None):
         self.parsed_description = parsed_link_description
+        self.mesh_dir = mesh_dir
 
     @property
     @abstractmethod
-    def geometry(self) -> Union[VisualShape, None]:
+    def geometry(self) -> Union[List[VisualShape], VisualShape, None]:
         """
-        Returns the geometry type of the collision element of this link.
+        The geometry type of the collision element of this link.
         """
         pass
 
@@ -63,8 +69,13 @@ class JointDescription(EntityDescription):
     A class that represents the description of a joint.
     """
 
-    def __init__(self, parsed_joint_description: Any):
+    def __init__(self, parsed_joint_description: Optional[Any] = None, is_virtual: bool = False):
+        """
+        :param parsed_joint_description: The parsed description of the joint (e.g. from urdf or mjcf file).
+        :param is_virtual: True if the joint is virtual (i.e. not a physically existing joint), False otherwise.
+        """
         self.parsed_description = parsed_joint_description
+        self.is_virtual: Optional[bool] = is_virtual
 
     @property
     @abstractmethod
@@ -86,8 +97,6 @@ class JointDescription(EntityDescription):
     @abstractmethod
     def has_limits(self) -> bool:
         """
-        Checks if this joint has limits.
-
         :return: True if the joint has limits, False otherwise.
         """
         pass
@@ -120,7 +129,7 @@ class JointDescription(EntityDescription):
 
     @property
     @abstractmethod
-    def parent_link_name(self) -> str:
+    def parent(self) -> str:
         """
         :return: The name of the parent link of this joint.
         """
@@ -128,7 +137,7 @@ class JointDescription(EntityDescription):
 
     @property
     @abstractmethod
-    def child_link_name(self) -> str:
+    def child(self) -> str:
         """
         :return: The name of the child link of this joint.
         """
@@ -160,6 +169,13 @@ class ObjectEntity(WorldEntity):
         self.object: Object = obj
 
     @property
+    def object_name(self) -> str:
+        """
+        The name of the object to which this joint belongs.
+        """
+        return self.object.name
+
+    @property
     @abstractmethod
     def pose(self) -> Pose:
         """
@@ -170,7 +186,7 @@ class ObjectEntity(WorldEntity):
     @property
     def transform(self) -> Transform:
         """
-        Returns the transform of this entity.
+        The transform of this entity.
 
         :return: The transform of this entity.
         """
@@ -180,7 +196,7 @@ class ObjectEntity(WorldEntity):
     @abstractmethod
     def tf_frame(self) -> str:
         """
-        Returns the tf frame of this entity.
+        The tf frame of this entity.
 
         :return: The tf frame of this entity.
         """
@@ -196,15 +212,136 @@ class ObjectEntity(WorldEntity):
 
 class Link(ObjectEntity, LinkDescription, ABC):
     """
-    Represents a link of an Object in the World.
+    A link of an Object in the World.
     """
 
     def __init__(self, _id: int, link_description: LinkDescription, obj: Object):
         ObjectEntity.__init__(self, _id, obj)
-        LinkDescription.__init__(self, link_description.parsed_description)
+        LinkDescription.__init__(self, link_description.parsed_description, link_description.mesh_dir)
         self.local_transformer: LocalTransformer = LocalTransformer()
         self.constraint_ids: Dict[Link, int] = {}
-        self._update_pose()
+        self._current_pose: Optional[Pose] = None
+        self.update_pose()
+
+    def get_axis_aligned_bounding_box(self, transform_to_link_pose: bool = True) -> AxisAlignedBoundingBox:
+        """
+        :param transform_to_link_pose: If True, return the bounding box transformed to the link pose.
+        :return: The axis-aligned bounding box of a link. First try to get it from the simulator, if not,
+         then calculate it depending on the type of the link geometry.
+        """
+        try:
+            return self.world.get_link_axis_aligned_bounding_box(self)
+        except NotImplementedError:
+            bounding_box = self.get_axis_aligned_bounding_box_from_geometry()
+            if transform_to_link_pose:
+                return bounding_box.get_transformed_box(self.transform)
+            else:
+                return bounding_box
+
+    def get_rotated_bounding_box(self) -> RotatedBoundingBox:
+        """
+        :return: The rotated bounding box of a link. First try to get it from the simulator, if not,
+         then calculate it depending on the type of the link geometry.
+        """
+        try:
+            return self.world.get_link_rotated_bounding_box(self)
+        except NotImplementedError:
+            return RotatedBoundingBox.from_axis_aligned_bounding_box(self.get_axis_aligned_bounding_box(),
+                                                                     self.transform)
+
+    def get_axis_aligned_bounding_box_from_geometry(self) -> AxisAlignedBoundingBox:
+        if isinstance(self.geometry, List):
+            all_boxes = [geom.get_axis_aligned_bounding_box(self.get_mesh_path(geom))
+                         if isinstance(geom, MeshVisualShape) else geom.get_axis_aligned_bounding_box()
+                         for geom in self.geometry
+                         ]
+            bounding_box = AxisAlignedBoundingBox.from_multiple_bounding_boxes(all_boxes)
+        else:
+            geom = self.geometry
+            bounding_box = geom.get_axis_aligned_bounding_box(self.get_mesh_path(geom)) \
+                if isinstance(geom, MeshVisualShape) else geom.get_axis_aligned_bounding_box()
+        return bounding_box
+
+    def get_convex_hull(self) -> Geometry3D:
+        """
+        :return: The convex hull of the link geometry.
+        """
+        try:
+            return self.world.get_link_convex_hull(self)
+        except NotImplementedError:
+            if isinstance(self.geometry, MeshVisualShape):
+                mesh_path = self.get_mesh_path(self.geometry)
+                mesh = trimesh.load(mesh_path)
+                return trimesh.convex.convex_hull(mesh).apply_transform(self.transform.get_homogeneous_matrix())
+            else:
+                raise LinkGeometryHasNoMesh(self.name, type(self.geometry).__name__)
+
+    def _plot_convex_hull(self):
+        """
+        Plot the convex hull of the link geometry.
+        """
+        hull = self.get_convex_hull()
+        hull.show()
+
+    def get_mesh_path(self, geometry: MeshVisualShape) -> str:
+        """
+        :param geometry: The geometry for which the mesh path should be returned.
+        :return: The path of the mesh file of this link if the geometry is a mesh.
+        """
+        return self.get_mesh_filename(geometry)
+
+    def get_mesh_filename(self, geometry: MeshVisualShape) -> str:
+        """
+        :return: The mesh file name of this link if the geometry is a mesh, otherwise raise a LinkGeometryHasNoMesh.
+        :raises LinkHasNoGeometry: If the link has no geometry.
+        :raises LinkGeometryHasNoMesh: If the geometry is not a mesh.
+        """
+        if geometry is None:
+            raise LinkHasNoGeometry(self.name)
+        if isinstance(geometry, MeshVisualShape):
+            return geometry.file_name
+        else:
+            raise LinkGeometryHasNoMesh(self.name, type(geometry).__name__)
+
+    def set_pose(self, pose: Pose) -> None:
+        """
+        Set the pose of this link to the given pose.
+        NOTE: This will move the entire object such that the link is at the given pose, it will not consider any joints
+        that can allow the link to be at the given pose.
+
+        :param pose: The target pose for this link.
+        """
+        self.object.set_pose(self.get_object_pose_given_link_pose(pose))
+
+    def get_object_pose_given_link_pose(self, pose):
+        """
+        Get the object pose given the link pose, which could be a hypothetical link pose to see what would be the object
+        pose in that case (assuming that the object itself moved not the joints).
+
+        :param pose: The link pose.
+        """
+        return (pose.to_transform(self.tf_frame) * self.get_transform_to_root_link()).to_pose()
+
+    def get_pose_given_object_pose(self, pose):
+        """
+        Get the link pose given the object pose, which could be a hypothetical object pose to see what would be the link
+        pose in that case (assuming that the object itself moved not the joints).
+
+        :param pose: The object pose.
+        """
+        return (pose.to_transform(self.object.tf_frame) * self.get_transform_from_root_link()).to_pose()
+
+    def get_transform_from_root_link(self) -> Transform:
+        """
+        Return the transformation from the root link of the object to this link.
+        """
+        return self.get_transform_from_link(self.object.root_link)
+
+    def get_transform_to_root_link(self) -> Transform:
+        """
+        Return the transformation from this link to the root link of the object.
+        """
+        return self.get_transform_to_link(self.object.root_link)
 
     @property
     def current_state(self) -> LinkState:
@@ -212,25 +349,41 @@ class Link(ObjectEntity, LinkDescription, ABC):
 
     @current_state.setter
     def current_state(self, link_state: LinkState) -> None:
-        self.constraint_ids = link_state.constraint_ids
+        if self.current_state != link_state:
+            if not self.all_constraint_links_belong_to_same_world(link_state):
+                raise ValueError("All constraint links must belong to the same world, since the constraint ids"
+                                 "are unique to the world and cannot be transferred between worlds.")
+            self.constraint_ids = link_state.constraint_ids
 
-    def add_fixed_constraint_with_link(self, child_link: 'Link') -> int:
+    def all_constraint_links_belong_to_same_world(self, other: LinkState) -> bool:
         """
-        Adds a fixed constraint between this link and the given link, used to create attachments for example.
+        Check if all links belong to the same world as the links in the other link state.
+
+        :param other: The state of the other link.
+        :return: True if all links belong to the same world, False otherwise.
+        """
+        return all([link.world == other_link.world for link, other_link in zip(self.constraint_ids.keys(),
+                                                                               other.constraint_ids.keys())])
+
+    def add_fixed_constraint_with_link(self, child_link: Self,
+                                       child_to_parent_transform: Optional[Transform] = None) -> int:
+        """
+        Add a fixed constraint between this link and the given link, to create attachments for example.
 
         :param child_link: The child link to which a fixed constraint should be added.
+        :param child_to_parent_transform: The transformation between the two links.
         :return: The unique id of the constraint.
         """
-        constraint_id = self.world.add_fixed_constraint(self,
-                                                        child_link,
-                                                        child_link.get_transform_from_link(self))
+        if child_to_parent_transform is None:
+            child_to_parent_transform = child_link.get_transform_to_link(self)
+        constraint_id = self.world.add_fixed_constraint(self, child_link, child_to_parent_transform)
         self.constraint_ids[child_link] = constraint_id
         child_link.constraint_ids[self] = constraint_id
         return constraint_id
 
     def remove_constraint_with_link(self, child_link: 'Link') -> None:
         """
-        Removes the constraint between this link and the given link.
+        Remove the constraint between this link and the given link.
 
         :param child_link: The child link of the constraint that should be removed.
         """
@@ -240,17 +393,22 @@ class Link(ObjectEntity, LinkDescription, ABC):
             del child_link.constraint_ids[self]
 
     @property
+    def is_only_link(self) -> bool:
+        """
+        :return: True if this link is the only link, False otherwise.
+        """
+        return self.object.has_one_link
+
+    @property
     def is_root(self) -> bool:
         """
-        Returns whether this link is the root link of the object.
-
         :return: True if this link is the root link, False otherwise.
         """
         return self.object.get_root_link_id() == self.id
 
-    def update_transform(self, transform_time: Optional[rospy.Time] = None) -> None:
+    def update_transform(self, transform_time: Optional[Time] = None) -> None:
         """
-        Updates the transformation of this link at the given time.
+        Update the transformation of this link at the given time.
 
         :param transform_time: The time at which the transformation should be updated.
         """
@@ -258,8 +416,6 @@ class Link(ObjectEntity, LinkDescription, ABC):
 
     def get_transform_to_link(self, link: 'Link') -> Transform:
         """
-        Returns the transformation from this link to the given link.
-
         :param link: The link to which the transformation should be returned.
         :return: A Transform object with the transformation from this link to the given link.
         """
@@ -267,8 +423,6 @@ class Link(ObjectEntity, LinkDescription, ABC):
 
     def get_transform_from_link(self, link: 'Link') -> Transform:
         """
-        Returns the transformation from the given link to this link.
-
         :param link: The link from which the transformation should be returned.
         :return: A Transform object with the transformation from the given link to this link.
         """
@@ -276,26 +430,14 @@ class Link(ObjectEntity, LinkDescription, ABC):
 
     def get_pose_wrt_link(self, link: 'Link') -> Pose:
         """
-        Returns the pose of this link with respect to the given link.
-
         :param link: The link with respect to which the pose should be returned.
         :return: A Pose object with the pose of this link with respect to the given link.
         """
         return self.local_transformer.transform_pose(self.pose, link.tf_frame)
 
-    def get_axis_aligned_bounding_box(self) -> AxisAlignedBoundingBox:
-        """
-        Returns the axis aligned bounding box of this link.
-
-        :return: An AxisAlignedBoundingBox object with the axis aligned bounding box of this link.
-        """
-        return self.world.get_link_axis_aligned_bounding_box(self)
-
     @property
     def position(self) -> Point:
         """
-        The getter for the position of the link relative to the world frame.
-
         :return: A Point object containing the position of the link relative to the world frame.
         """
         return self.pose.position
@@ -303,8 +445,6 @@ class Link(ObjectEntity, LinkDescription, ABC):
     @property
     def position_as_list(self) -> List[float]:
         """
-        The getter for the position of the link relative to the world frame as a list.
-
         :return: A list containing the position of the link relative to the world frame.
         """
         return self.pose.position_as_list()
@@ -312,8 +452,6 @@ class Link(ObjectEntity, LinkDescription, ABC):
     @property
     def orientation(self) -> Quaternion:
         """
-        The getter for the orientation of the link relative to the world frame.
-
         :return: A Quaternion object containing the orientation of the link relative to the world frame.
         """
         return self.pose.orientation
@@ -321,55 +459,58 @@ class Link(ObjectEntity, LinkDescription, ABC):
     @property
     def orientation_as_list(self) -> List[float]:
         """
-        The getter for the orientation of the link relative to the world frame as a list.
-
         :return: A list containing the orientation of the link relative to the world frame.
         """
         return self.pose.orientation_as_list()
 
-    def _update_pose(self) -> None:
+    def update_pose(self) -> None:
         """
-        Updates the current pose of this link from the world.
+        Update the current pose of this link from the world.
         """
         self._current_pose = self.world.get_link_pose(self)
 
     @property
     def pose(self) -> Pose:
         """
-        The pose of the link relative to the world frame.
-
         :return: A Pose object containing the pose of the link relative to the world frame.
         """
+        if self.world.conf.update_poses_from_sim_on_get:
+            self.update_pose()
         return self._current_pose
 
     @property
     def pose_as_list(self) -> List[List[float]]:
         """
-        The pose of the link relative to the world frame as a list.
-
         :return: A list containing the position and orientation of the link relative to the world frame.
         """
         return self.pose.to_list()
 
     def get_origin_transform(self) -> Transform:
         """
-        Returns the transformation between the link frame and the origin frame of this link.
+        :return: the transformation between the link frame and the origin frame of this link.
         """
         return self.origin.to_transform(self.tf_frame)
 
     @property
     def color(self) -> Color:
         """
-        The getter for the rgba_color of this link.
-
         :return: A Color object containing the rgba_color of this link.
         """
         return self.world.get_link_color(self)
 
+    @deprecated("Use color property setter instead")
+    def set_color(self, color: Color) -> None:
+        """
+        Set the color of this link, could be rgb or rgba.
+
+        :param color: The color as a list of floats, either rgb or rgba.
+        """
+        self.color = color
+
     @color.setter
     def color(self, color: Color) -> None:
         """
-        The setter for the color of this link, could be rgb or rgba.
+        Set the color of this link, could be rgb or rgba.
 
         :param color: The color as a list of floats, either rgb or rgba.
         """
@@ -401,8 +542,8 @@ class Link(ObjectEntity, LinkDescription, ABC):
 
 class RootLink(Link, ABC):
     """
-    Represents the root link of an Object in the World.
-    It differs from the normal AbstractLink class in that the pose ande the tf_frame is the same as that of the object.
+    The root link of an Object in the World.
+    This differs from the normal AbstractLink class in that the pose and the tf_frame is the same as that of the object.
     """
 
     def __init__(self, obj: Object):
@@ -411,12 +552,12 @@ class RootLink(Link, ABC):
     @property
     def tf_frame(self) -> str:
         """
-        Returns the tf frame of the root link, which is the same as the tf frame of the object.
+        :return: the tf frame of the root link, which is the same as the tf frame of the object.
         """
         return self.object.tf_frame
 
-    def _update_pose(self) -> None:
-        self._current_pose = self.object.get_pose()
+    def update_pose(self) -> None:
+        self._current_pose = self.world.get_object_pose(self.object)
 
     def __copy__(self):
         return RootLink(self.object)
@@ -424,14 +565,16 @@ class RootLink(Link, ABC):
 
 class Joint(ObjectEntity, JointDescription, ABC):
     """
-    Represents a joint of an Object in the World.
+    Represent a joint of an Object in the World.
     """
 
     def __init__(self, _id: int,
                  joint_description: JointDescription,
-                 obj: Object):
+                 obj: Object, is_virtual: Optional[bool] = False):
         ObjectEntity.__init__(self, _id, obj)
-        JointDescription.__init__(self, joint_description.parsed_description)
+        JointDescription.__init__(self, joint_description.parsed_description, is_virtual)
+        self.acceptable_error = (self.world.conf.revolute_joint_position_tolerance if self.type == JointType.REVOLUTE
+                                 else self.world.conf.prismatic_joint_position_tolerance)
         self._update_position()
 
     @property
@@ -444,38 +587,34 @@ class Joint(ObjectEntity, JointDescription, ABC):
     @property
     def pose(self) -> Pose:
         """
-        Returns the pose of this joint. The pose is the pose of the child link of this joint.
-
-        :return: The pose of this joint.
+        :return: The pose of this joint. The pose is the pose of the child link of this joint.
         """
         return self.child_link.pose
 
     def _update_position(self) -> None:
         """
-        Updates the current position of the joint from the physics simulator.
+        Update the current position of the joint from the physics simulator.
         """
         self._current_position = self.world.get_joint_position(self)
 
     @property
     def parent_link(self) -> Link:
         """
-        Returns the parent link of this joint.
-
         :return: The parent link as a AbstractLink object.
         """
-        return self.object.get_link(self.parent_link_name)
+        return self.object.get_link(self.parent)
 
     @property
     def child_link(self) -> Link:
         """
-        Returns the child link of this joint.
-
         :return: The child link as a AbstractLink object.
         """
-        return self.object.get_link(self.child_link_name)
+        return self.object.get_link(self.child)
 
     @property
     def position(self) -> float:
+        if self.world.conf.update_poses_from_sim_on_get:
+            self._update_position()
         return self._current_position
 
     def reset_position(self, position: float) -> None:
@@ -484,8 +623,6 @@ class Joint(ObjectEntity, JointDescription, ABC):
 
     def get_object_id(self) -> int:
         """
-        Returns the id of the object to which this joint belongs.
-
         :return: The integer id of the object to which this joint belongs.
         """
         return self.object.id
@@ -493,8 +630,8 @@ class Joint(ObjectEntity, JointDescription, ABC):
     @position.setter
     def position(self, joint_position: float) -> None:
         """
-        Sets the position of the given joint to the given joint pose. If the pose is outside the joint limits,
-         an error will be printed. However, the joint will be set either way.
+        Set the position of the given joint to the given joint pose. If the pose is outside the joint limits,
+         issue a warning. However, set the joint either way.
 
         :param joint_position: The target pose for this joint
         """
@@ -524,16 +661,16 @@ class Joint(ObjectEntity, JointDescription, ABC):
 
     @property
     def current_state(self) -> JointState:
-        return JointState(self.position)
+        return JointState(self.position, self.acceptable_error)
 
     @current_state.setter
     def current_state(self, joint_state: JointState) -> None:
         """
-        Updates the current state of this joint from the given joint state if the position is different.
+        Update the current state of this joint from the given joint state if the position is different.
 
         :param joint_state: The joint state to update from.
         """
-        if self._current_position != joint_state.position:
+        if self.current_state != joint_state:
             self.position = joint_state.position
 
     def __copy__(self):
@@ -547,12 +684,11 @@ class Joint(ObjectEntity, JointDescription, ABC):
 
 
 class ObjectDescription(EntityDescription):
-
     """
     A class that represents the description of an object.
     """
 
-    mesh_extensions: Tuple[str] = (".obj", ".stl", ".dae")
+    mesh_extensions: Tuple[str] = (".obj", ".stl", ".dae", ".ply")
     """
     The file extensions of the mesh files that can be used to generate a description file.
     """
@@ -570,23 +706,108 @@ class ObjectDescription(EntityDescription):
         """
         :param path: The path of the file to update the description data from.
         """
+
+        self._links: Optional[List[LinkDescription]] = None
+        self._joints: Optional[List[JointDescription]] = None
+        self._link_map: Optional[Dict[str, Any]] = None
+        self._joint_map: Optional[Dict[str, Any]] = None
+        self.original_path: Optional[str] = path
+
         if path:
             self.update_description_from_file(path)
         else:
             self._parsed_description = None
 
+        self.virtual_joint_names: List[str] = []
+
+    @property
+    @abstractmethod
+    def child_map(self) -> Dict[str, List[Tuple[str, str]]]:
+        """
+        :return: A dictionary mapping the name of a link to its children which are represented as a tuple of the child
+            joint name and the link name.
+        """
+        pass
+
+    @property
+    @abstractmethod
+    def parent_map(self) -> Dict[str, Tuple[str, str]]:
+        """
+        :return: A dictionary mapping the name of a link to its parent joint and link as a tuple.
+        """
+        pass
+
+    @property
+    @abstractmethod
+    def link_map(self) -> Dict[str, LinkDescription]:
+        """
+        :return: A dictionary mapping the name of a link to its description.
+        """
+        pass
+
+    @property
+    @abstractmethod
+    def joint_map(self) -> Dict[str, JointDescription]:
+        """
+        :return: A dictionary mapping the name of a joint to its description.
+        """
+        pass
+
+    def is_joint_virtual(self, name: str) -> bool:
+        """
+        :param name: The name of the joint.
+        :return: True if the joint is virtual, False otherwise.
+        """
+        return name in self.virtual_joint_names
+
+    @abstractmethod
+    def add_joint(self, name: str, child: str, joint_type: JointType,
+                  axis: Point, parent: Optional[str] = None, origin: Optional[Pose] = None,
+                  lower_limit: Optional[float] = None, upper_limit: Optional[float] = None,
+                  is_virtual: Optional[bool] = False) -> None:
+        """
+        Add a joint to this object.
+
+        :param name: The name of the joint.
+        :param child: The name of the child link.
+        :param joint_type: The type of the joint.
+        :param axis: The axis of the joint.
+        :param parent: The name of the parent link.
+        :param origin: The origin of the joint.
+        :param lower_limit: The lower limit of the joint.
+        :param upper_limit: The upper limit of the joint.
+        :param is_virtual: True if the joint is virtual, False otherwise.
+        """
+        pass
+
     def update_description_from_file(self, path: str) -> None:
         """
-        Updates the description of this object from the file at the given path.
+        Update the description of this object from the file at the given path.
 
         :param path: The path of the file to update from.
         """
         self._parsed_description = self.load_description(path)
 
+    def update_description_from_string(self, description_string: str) -> None:
+        """
+        Update the description of this object from the given description string.
+
+        :param description_string: The description string to update from.
+        """
+        self._parsed_description = self.load_description_from_string(description_string)
+
+    def load_description_from_string(self, description_string: str) -> Any:
+        """
+        Load the description from the given string.
+
+        :param description_string: The description string to load from.
+        """
+        raise NotImplementedError
+
     @property
     def parsed_description(self) -> Any:
         """
-        Return the object parsed from the description file.
+        :return: The object parsed from the description file.
         """
         return self._parsed_description
 
@@ -600,46 +821,79 @@ class ObjectDescription(EntityDescription):
     @abstractmethod
     def load_description(self, path: str) -> Any:
         """
-        Loads the description from the file at the given path.
+        Load the description from the file at the given path.
 
         :param path: The path to the source file, if only a filename is provided then the resources directories will be
          searched.
         """
         pass
 
-    def generate_description_from_file(self, path: str, name: str, extension: str) -> str:
+    def generate_description_from_file(self, path: str, name: str, extension: str, save_path: str,
+                                       scale_mesh: Optional[float] = None,
+                                       mesh_transform: Optional[Transform] = None) -> None:
         """
-        Generates and preprocesses the description from the file at the given path and returns the preprocessed
-        description as a string.
+        Generate and preprocess the description from the file at the given path and save the preprocessed
+        description. The generated description will be saved at the given save path.
 
         :param path: The path of the file to preprocess.
         :param name: The name of the object.
         :param extension: The file extension of the file to preprocess.
-        :return: The processed description string.
+        :param save_path: The path to save the generated description file.
+        :param scale_mesh: The scale of the mesh.
+        :param mesh_transform: The transformation matrix to apply to the mesh.
+        :raises ObjectDescriptionNotFound: If the description file could not be found/read.
         """
-        description_string = None
 
         if extension in self.mesh_extensions:
-            description_string = self.generate_from_mesh_file(path, name)
+            if extension == ".ply":
+                mesh = trimesh.load(path)
+                if scale_mesh is not None:
+                    mesh.apply_scale(scale_mesh)
+                if mesh_transform is not None:
+                    transform = mesh_transform.get_homogeneous_matrix()
+                    mesh.apply_transform(transform)
+                path = path.replace(extension, ".obj")
+                mesh.export(path)
+            self.generate_from_mesh_file(path, name, save_path=save_path)
         elif extension == self.get_file_extension():
-            description_string = self.generate_from_description_file(path)
+            self.generate_from_description_file(path, save_path=save_path)
         else:
             try:
                 # Using the description from the parameter server
-                description_string = self.generate_from_parameter_server(path)
+                self.generate_from_parameter_server(path, save_path=save_path)
             except KeyError:
-                logging.warning(f"Couldn't find dile data in the ROS parameter server")
-        if description_string is None:
-            logging.error(f"Could not find file with path {path} in the resources directory nor"
-                          f" in the ros parameter server.")
-            raise FileNotFoundError
+                logging.warning(f"Couldn't find file data in the ROS parameter server")
 
-        return description_string
+        if not self.check_description_file_exists_and_can_be_read(save_path):
+            raise ObjectDescriptionNotFound(name, path, extension)
+
+    @staticmethod
+    def check_description_file_exists_and_can_be_read(path: str) -> bool:
+        """
+        Check if the description file exists at the given path.
+
+        :param path: The path to the description file.
+        :return: True if the file exists, False otherwise.
+        """
+        exists = os.path.exists(path)
+        if exists:
+            with open(path, "r") as file:
+                exists = bool(file.read())
+        return exists
+
+    @staticmethod
+    def write_description_to_file(description_string: str, save_path: str) -> None:
+        """
+        Write the description string to the file at the given path.
+
+        :param description_string: The description string to write.
+        :param save_path: The path of the file to write to.
+        """
+        with open(save_path, "w") as file:
+            file.write(description_string)
 
     def get_file_name(self, path_object: pathlib.Path, extension: str, object_name: str) -> str:
         """
-        Returns the file name of the description file.
-
         :param path_object: The path object of the description file or the mesh file.
         :param extension: The file extension of the description file or the mesh file.
         :param object_name: The name of the object.
@@ -656,36 +910,39 @@ class ObjectDescription(EntityDescription):
 
     @classmethod
     @abstractmethod
-    def generate_from_mesh_file(cls, path: str, name: str) -> str:
+    def generate_from_mesh_file(cls, path: str, name: str, save_path: str) -> None:
         """
-        Generates a description file from one of the mesh types defined in the mesh_extensions and
-        returns the path of the generated file.
+        Generate a description file from one of the mesh types defined in the mesh_extensions and
+        return the path of the generated file. The generated file will be saved at the given save_path.
 
         :param path: The path to the .obj file.
         :param name: The name of the object.
-        :return: The path of the generated description file.
+        :param save_path: The path to save the generated description file.
         """
         pass
 
     @classmethod
     @abstractmethod
-    def generate_from_description_file(cls, path: str) -> str:
+    def generate_from_description_file(cls, path: str, save_path: str, make_mesh_paths_absolute: bool = True) -> None:
         """
-        Preprocesses the given file and returns the preprocessed description string.
+        Preprocess the given file and return the preprocessed description string. The preprocessed description will be
+        saved at the given save_path.
 
         :param path: The path of the file to preprocess.
-        :return: The preprocessed description string.
+        :param save_path: The path to save the preprocessed description file.
+        :param make_mesh_paths_absolute: Whether to make the mesh paths absolute.
         """
         pass
 
     @classmethod
     @abstractmethod
-    def generate_from_parameter_server(cls, name: str) -> str:
+    def generate_from_parameter_server(cls, name: str, save_path: str) -> None:
         """
-        Preprocesses the description from the ROS parameter server and returns the preprocessed description string.
+        Preprocess the description from the ROS parameter server and return the preprocessed description string.
+        The preprocessed description will be saved at the given save_path.
 
         :param name: The name of the description on the parameter server.
-        :return: The preprocessed description string.
+        :param save_path: The path to save the preprocessed description file.
         """
         pass
 
@@ -697,12 +954,11 @@ class ObjectDescription(EntityDescription):
         """
         pass
 
-    @abstractmethod
     def get_link_by_name(self, link_name: str) -> LinkDescription:
         """
         :return: The link description with the given name.
         """
-        pass
+        return self.link_map[link_name]
 
     @property
     @abstractmethod
@@ -712,12 +968,11 @@ class ObjectDescription(EntityDescription):
         """
         pass
 
-    @abstractmethod
     def get_joint_by_name(self, joint_name: str) -> JointDescription:
         """
         :return: The joint description with the given name.
         """
-        pass
+        return self.joint_map[joint_name]
 
     @abstractmethod
     def get_root(self) -> str:
@@ -726,8 +981,15 @@ class ObjectDescription(EntityDescription):
         """
         pass
 
+    def get_tip(self) -> str:
+        """
+        :return: the name of the tip link of this object.
+        """
+        raise NotImplementedError
+
     @abstractmethod
-    def get_chain(self, start_link_name: str, end_link_name: str) -> List[str]:
+    def get_chain(self, start_link_name: str, end_link_name: str, joints: Optional[bool] = True,
+                  links: Optional[bool] = True, fixed: Optional[bool] = True) -> List[str]:
         """
         :return: the chain of links from 'start_link_name' to 'end_link_name'.
         """

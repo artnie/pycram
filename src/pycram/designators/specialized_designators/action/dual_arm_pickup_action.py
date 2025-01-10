@@ -1,4 +1,3 @@
-import rospy
 from typing_extensions import List, Union, Optional
 from numpy.linalg import norm
 from numpy import array
@@ -13,6 +12,7 @@ from ....datastructures.pose import Pose, Transform
 from ....datastructures.enums import Arms, Grasp
 from ....robot_description import RobotDescription, KinematicChainDescription
 from ....designator import ObjectDesignatorDescription
+from ....ros.logging import loginfo
 
 
 class DualArmPickupAction(PickUpAction):
@@ -22,8 +22,7 @@ class DualArmPickupAction(PickUpAction):
 
     def __init__(self,
                  object_designator_description: Union[ObjectDesignatorDescription, ObjectDesignatorDescription.Object],
-                 grasps: List[Grasp], resolver=None,
-                 ontology_concept_holders: Optional[List[Thing]] = None):
+                 grasps: List[Grasp], resolver=None):
         """
         Specialized version of the PickUpAction designator which uses heuristics to solve for a dual pickup problem. The
         designator will choose the arm which is closest to the object that is to be picked up.
@@ -32,13 +31,11 @@ class DualArmPickupAction(PickUpAction):
         :param grasps: List of possible grasps which should be used for the pickup
         :param resolver: Optional specialized_designators that returns a performable designator with elements from the
                          lists of possible parameter
-        :param ontology_concept_holders: List of ontology concepts that the action is categorized as or associated with
         """
         super().__init__(object_designator_description,
                          arms=[Arms.LEFT, Arms.RIGHT],
                          grasps=grasps,
-                         resolver=resolver,
-                         ontology_concept_holders=ontology_concept_holders)
+                         resolver=resolver)
 
         self.object_designator_description: Union[
             ObjectDesignatorDescription, ObjectDesignatorDescription.Object] = object_designator_description
@@ -54,7 +51,7 @@ class DualArmPickupAction(PickUpAction):
         else:
             obj_desig = self.object_designator_description.resolve()
 
-        rospy.loginfo("Calculating closest gripper to object {}".format(obj_desig.name))
+        loginfo("Calculating closest gripper to object {}".format(obj_desig.name))
 
         local_transformer = LocalTransformer()
 
@@ -68,11 +65,11 @@ class DualArmPickupAction(PickUpAction):
             object_T_gripper: Pose = local_transformer.transform_pose(object_pose, gripper_frame)
             object_V_gripper: Vector3 = object_T_gripper.pose.position  # translation vector
             distance = norm(array([object_V_gripper.x, object_V_gripper.y, object_V_gripper.z]))
-            rospy.loginfo(f"Distance between {gripper} and {obj_desig.name}: {distance}")
+            loginfo(f"Distance between {gripper} and {obj_desig.name}: {distance}")
             distances.append(distance)
 
         min_index = distances.index(min(distances))
         winner = self.gripper_list[min_index]
-        rospy.loginfo(f"Winner is {winner.arm_type.name} with distance {min(distances):.2f}")
+        loginfo(f"Winner is {winner.arm_type.name} with distance {min(distances):.2f}")
 
         return PickUpActionPerformable(object_designator=obj_desig, arm=winner.arm_type, grasp=self.grasps[0])

@@ -1,8 +1,8 @@
 import numpy as np
-import rospy
 from threading import Lock
 from typing_extensions import Any
 
+from .default_process_modules import *
 from ..datastructures.enums import ExecutionType
 from ..external_interfaces.tmc import tmc_gripper_control, tmc_talk
 from ..robot_description import RobotDescription
@@ -17,25 +17,9 @@ from gtts import gTTS
 
 import io
 
-
-class HSRBNavigation(ProcessModule):
-    """
-    The process module to move the robot from one position to another.
-    """
-
-    def _execute(self, desig: MoveMotion):
-        robot = World.robot
-        robot.set_pose(desig.target)
+from ..ros.logging import logdebug
 
 
-class HSRBDetecting(ProcessModule):
-    """
-    This process module tries to detect an object with the given type. To be detected the object has to be in
-    the field of view of the robot.
-    """
-   # pass
-    def _execute(self, desig: DetectingMotion) -> Any:
-        pass
 
 
 ###########################################################
@@ -49,7 +33,7 @@ class HSRBNavigationReal(ProcessModule):
     """
 
     def _execute(self, designator: MoveMotion) -> Any:
-        rospy.logdebug(f"Sending goal to giskard to Move the robot")
+        logdebug(f"Sending goal to giskard to Move the robot")
         # giskard.achieve_cartesian_goal(designator.target, robot_description.base_link, "map")
         # todome fix this
         # queryPoseNav(designator.target)
@@ -63,16 +47,6 @@ class HSRBMoveHeadReal(ProcessModule):
     def _execute(self, desig: LookingMotion):
         target = desig.target
         giskard.move_head_to_pose(target)
-
-
-class HSRBDetectingReal(ProcessModule):
-    """
-    Process Module for the real HSRB that tries to detect an object fitting the given object description. Uses Robokudo
-    for perception of the environment.
-    """
-
-    def _execute(self, desig: DetectingMotion) -> Any:
-        pass
 
 
 class HSRBMoveTCPReal(ProcessModule):
@@ -163,7 +137,7 @@ class HSRBNavigationSemiReal(ProcessModule):
     """
 
     def _execute(self, designator: MoveMotion) -> Any:
-        rospy.logdebug(f"Sending goal to giskard to Move the robot")
+        logdebug(f"Sending goal to giskard to Move the robot")
         giskard.teleport_robot(designator.target)
 
 
@@ -198,27 +172,17 @@ class HSRBTalkSemiReal(ProcessModule):
 ###########################################################
 ########## HSRB MANAGER ###############
 ###########################################################
-class HSRBManager(ProcessModuleManager):
+class HSRBManager(DefaultManager):
 
     def __init__(self):
-        super().__init__("hsrb")
+        super().__init__()
+        self.robot_name = "hsrb"
         self._navigate_lock = Lock()
-        self._pick_up_lock = Lock()
-        self._place_lock = Lock()
-        self._looking_lock = Lock()
-        self._detecting_lock = Lock()
-        self._move_tcp_lock = Lock()
-        self._move_arm_joints_lock = Lock()
-        self._world_state_detecting_lock = Lock()
-        self._move_joints_lock = Lock()
-        self._move_gripper_lock = Lock()
-        self._open_lock = Lock()
-        self._close_lock = Lock()
-        self._talk_lock = Lock()
+
 
     def navigate(self):
         if ProcessModuleManager.execution_type == ExecutionType.SIMULATED:
-            return HSRBNavigation(self._navigate_lock)
+            return DefaultNavigation(self._navigate_lock)
         elif ProcessModuleManager.execution_type == ExecutionType.REAL:
             return HSRBNavigationReal(self._navigate_lock)
         elif ProcessModuleManager.execution_type == ExecutionType.SEMI_REAL:
@@ -232,11 +196,9 @@ class HSRBManager(ProcessModuleManager):
 
     def detecting(self):
         if ProcessModuleManager.execution_type == ExecutionType.SIMULATED:
-            return HSRBDetecting(self._detecting_lock)
+            return DefaultDetecting(self._detecting_lock)
         elif ProcessModuleManager.execution_type == ExecutionType.REAL:
-            return HSRBDetectingReal(self._detecting_lock)
-        elif ProcessModuleManager.execution_type == ExecutionType.SEMI_REAL:
-            return HSRBDetecting(self._detecting_lock)
+            return DefaultDetectingReal(self._detecting_lock)
 
     def move_tcp(self):
         if  ProcessModuleManager.execution_type == ExecutionType.REAL:

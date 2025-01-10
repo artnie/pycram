@@ -15,10 +15,9 @@ jupyter:
 # Hands on Object Relational Mapping in PyCram
 
 This tutorial will walk you through the serialization of a minimal plan in pycram.
-First we will import sqlalchemy, create an in memory database and connect a session to it.
+First we will import sqlalchemy, create an in-memory database and connect a session to it.
 
 ```python
-import sqlalchemy
 import sqlalchemy.orm
 
 engine = sqlalchemy.create_engine("sqlite+pysqlite:///:memory:", echo=False)
@@ -29,7 +28,6 @@ session
 Next we create the database schema using the sqlalchemy functionality. For that we need to import the base class of pycram.orm.
 
 ```python
-import pycram.orm.base
 import pycram.orm.action_designator
 pycram.orm.base.Base.metadata.create_all(engine)
 session.commit()
@@ -41,20 +39,22 @@ Next we will write a simple plan where the robot parks his arms and then moves s
 from pycram.designators.action_designator import *
 from pycram.designators.location_designator import *
 from pycram.process_module import simulated_robot
-from pycram.datastructures.enums import Arms, ObjectType, Grasp, WorldMode
+from pycram.datastructures.enums import Arms, ObjectType, Grasp, WorldMode, TorsoState
 from pycram.tasktree import with_tree
 import pycram.tasktree
 from pycram.worlds.bullet_world import BulletWorld
 from pycram.world_concepts.world_object import Object
 from pycram.designators.object_designator import *
 from pycram.datastructures.pose import Pose
+from pycram.orm.base import ProcessMetaData
 import anytree
+import pycrap
 
-world = BulletWorld(WorldMode.GUI)
-pr2 = Object("pr2", ObjectType.ROBOT, "pr2.urdf")
-kitchen = Object("kitchen", ObjectType.ENVIRONMENT, "kitchen.urdf")
-milk = Object("milk", ObjectType.MILK, "milk.stl", pose=Pose([1.3, 1, 0.9]))
-cereal = Object("cereal", ObjectType.BREAKFAST_CEREAL, "breakfast_cereal.stl", pose=Pose([1.3, 0.7, 0.95]))
+world = BulletWorld(WorldMode.DIRECT)
+pr2 = Object("pr2", pycrap.Robot, "pr2.urdf")
+kitchen = Object("kitchen", pycrap.Kitchen, "kitchen.urdf")
+milk = Object("milk", pycrap.Milk, "milk.stl", pose=Pose([1.3, 1, 0.9]))
+cereal = Object("cereal", pycrap.Cereal, "breakfast_cereal.stl", pose=Pose([1.3, 0.7, 0.95]))
 milk_desig = ObjectDesignatorDescription(names=["milk"])
 cereal_desig = ObjectDesignatorDescription(names=["cereal"])
 robot_desig = ObjectDesignatorDescription(names=["pr2"]).resolve()
@@ -64,7 +64,7 @@ kitchen_desig = ObjectDesignatorDescription(names=["kitchen"])
 def plan():
     with simulated_robot:
         ParkArmsActionPerformable(Arms.BOTH).perform()
-        MoveTorsoAction([0.2]).resolve().perform()
+        MoveTorsoAction([TorsoState.MID]).resolve().perform()
         pickup_pose = CostmapLocation(target=cereal_desig.resolve(), reachable_for=robot_desig).resolve()
         pickup_arm = pickup_pose.reachable_arms[0]
         NavigateAction(target_locations=[pickup_pose.pose]).resolve().perform()
@@ -85,9 +85,9 @@ def plan():
 plan()
 
 # set description of what we are doing
-pycram.orm.base.ProcessMetaData().description = "Tutorial for getting familiar with the ORM."
+ProcessMetaData().description = "Tutorial for getting familiar with the ORM."
 task_tree = pycram.tasktree.task_tree
-print(anytree.RenderTree(task_tree))
+print(anytree.RenderTree(task_tree.root))
 ```
 
 Next we serialize the task tree by recursively inserting from its root.
@@ -163,25 +163,16 @@ class ORMSaying(Action):
     text: Mapped[str] 
 
 # define brand new action designator
-
+# Since this class is derived from ActionAbstract, we do not need to manually define the insert() and to_sql() function, the mapping is done automatically. We just have to tell the class, which ORMclass it is supposed to use.
 @dataclass 
-class SayingActionPerformable(ActionDesignatorDescription.Action):
+class SayingActionPerformable(ActionAbstract):
     
     text: str
+    orm_class = ORMSaying
         
     @with_tree
-    def perform(self) -> None:
+    def plan(self) -> None:
         print(self.text)
-
-    def to_sql(self) -> ORMSaying:
-        return ORMSaying(self.text)
-
-    def insert(self, session: Session, *args, **kwargs) -> ORMSaying:
-        action = super().insert(session)
-        session.add(action)
-        session.commit()
-        return action
-
 ```
 
 Now we got our new ActionDesignator called Saying and its ORM version. Since this class got created after all other classes got inserted into the database (in the beginning of the notebook) we have to insert it manually. 

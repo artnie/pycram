@@ -1,5 +1,8 @@
 from threading import Lock
 import numpy as np
+
+from .default_process_modules import DefaultManager
+from .donbot_process_modules import _park_arms
 from .. import world_reasoning as btr
 from ..utils import _apply_ik
 from ..designators.motion_designator import *
@@ -89,13 +92,13 @@ class BoxyMoveHead(ProcessModule):
         pose_in_shoulder = local_transformer.transform_pose(target, robot.get_link_tf_frame("neck_shoulder_link"))
 
         if pose_in_shoulder.position.x >= 0 and pose_in_shoulder.position.x >= abs(pose_in_shoulder.position.y):
-            robot.set_joint_positions(RobotDescription.current_robot_description.get_static_joint_chain("neck", "front"))
+            robot.set_multiple_joint_positions(RobotDescription.current_robot_description.get_static_joint_chain("neck", "front"))
         if pose_in_shoulder.position.y >= 0 and pose_in_shoulder.position.y >= abs(pose_in_shoulder.position.x):
-            robot.set_joint_positions(RobotDescription.current_robot_description.get_static_joint_chain("neck", "neck_right"))
+            robot.set_multiple_joint_positions(RobotDescription.current_robot_description.get_static_joint_chain("neck", "neck_right"))
         if pose_in_shoulder.position.x <= 0 and abs(pose_in_shoulder.position.x) > abs(pose_in_shoulder.position.y):
-            robot.set_joint_positions(RobotDescription.current_robot_description.get_static_joint_chain("neck", "back"))
+            robot.set_multiple_joint_positions(RobotDescription.current_robot_description.get_static_joint_chain("neck", "back"))
         if pose_in_shoulder.position.y <= 0 and abs(pose_in_shoulder.position.y) > abs(pose_in_shoulder.position.x):
-            robot.set_joint_positions(RobotDescription.current_robot_description.get_static_joint_chain("neck", "neck_left"))
+            robot.set_multiple_joint_positions(RobotDescription.current_robot_description.get_static_joint_chain("neck", "neck_left"))
 
         pose_in_shoulder = local_transformer.transform_pose(target, robot.get_link_tf_frame("neck_shoulder_link"))
 
@@ -115,7 +118,7 @@ class BoxyMoveGripper(ProcessModule):
         robot = World.robot
         gripper = desig.gripper
         motion = desig.motion
-        robot.set_joint_positions(RobotDescription.current_robot_description.kinematic_chains[gripper].get_static_gripper_state(motion))
+        robot.set_multiple_joint_positions(RobotDescription.current_robot_description.kinematic_chains[gripper].get_static_gripper_state(motion))
 
 
 class BoxyDetecting(ProcessModule):
@@ -128,13 +131,13 @@ class BoxyDetecting(ProcessModule):
         robot = World.robot
         object_type = desig.object_type
         # Should be "wide_stereo_optical_frame"
-        cam_frame_name = RobotDescription.current_robot_description.get_camera_frame()
+        cam_link_name = RobotDescription.current_robot_description.get_camera_link()
         # should be [0, 0, 1]
         front_facing_axis = RobotDescription.current_robot_description.get_default_camera().front_facing_axis
 
         objects = World.current_world.get_object_by_type(object_type)
         for obj in objects:
-            if btr.visible(obj, robot.get_link_pose(cam_frame_name), front_facing_axis):
+            if btr.visible(obj, robot.get_link_pose(cam_link_name), front_facing_axis):
                 return obj
 
 
@@ -160,9 +163,9 @@ class BoxyMoveArmJoints(ProcessModule):
 
         robot = World.robot
         if desig.right_arm_poses:
-            robot.set_joint_positions(desig.right_arm_poses)
+            robot.set_multiple_joint_positions(desig.right_arm_poses)
         if desig.left_arm_poses:
-            robot.set_joint_positions(desig.left_arm_poses)
+            robot.set_multiple_joint_positions(desig.left_arm_poses)
 
 
 class BoxyWorldStateDetecting(ProcessModule):
@@ -184,20 +187,12 @@ def _move_arm_tcp(target: Pose, robot: Object, arm: Arms) -> None:
     _apply_ik(robot, inv)
 
 
-class BoxyManager(ProcessModuleManager):
+class BoxyManager(DefaultManager):
 
     def __init__(self):
-        super().__init__("boxy")
-        self._navigate_lock = Lock()
-        self._looking_lock = Lock()
-        self._detecting_lock = Lock()
-        self._move_tcp_lock = Lock()
-        self._move_arm_joints_lock = Lock()
-        self._world_state_detecting_lock = Lock()
-        self._move_joints_lock = Lock()
-        self._move_gripper_lock = Lock()
-        self._open_lock = Lock()
-        self._close_lock = Lock()
+        super().__init__()
+        self.robot_name = "boxy"
+
 
     def navigate(self):
         if ProcessModuleManager.execution_type ==  ExecutionType.SIMULATED:

@@ -1,13 +1,23 @@
+from ..datastructures.dataclasses import VirtualMobileBaseJoints
 from ..robot_description import RobotDescription, KinematicChainDescription, EndEffectorDescription, \
     RobotDescriptionManager, CameraDescription
-from ..datastructures.enums import Arms, Grasp, GripperState, GripperType
-import rospkg
+from ..datastructures.enums import Arms, Grasp, GripperState, GripperType, TorsoState
+from ..ros.ros_tools import get_ros_package_path
 
-rospack = rospkg.RosPack()
-filename = rospack.get_path('pycram') + '/resources/robots/' + "pr2" + '.urdf'
+from ..helper import get_robot_mjcf_path
 
-pr2_description = RobotDescription("pr2", "base_link", "torso_lift_link", "torso_lift_joint",
-                                   filename)
+filename = get_ros_package_path('pycram') + '/resources/robots/' + "pr2" + '.urdf'
+
+mjcf_filename = get_robot_mjcf_path("", "pr2")
+
+pr2_description = RobotDescription("pr2", "base_link", "torso_lift_link",
+                                   "torso_lift_joint", filename,
+                                   virtual_mobile_base_joints=VirtualMobileBaseJoints(),
+                                   mjcf_path=mjcf_filename,
+                                   ignore_joints=['torso_lift_motor_screw_joint', 'r_gripper_motor_slider_joint',
+                                                  'r_gripper_motor_screw_joint', 'r_gripper_joint',
+                                                  'l_gripper_motor_slider_joint', 'l_gripper_motor_screw_joint',
+                                                  'l_gripper_joint'])
 
 ################################## Left Arm ##################################
 left_arm = KinematicChainDescription("left", "torso_lift_link", "l_wrist_roll_link",
@@ -25,9 +35,9 @@ pr2_description.add_kinematic_chain_description(left_arm)
 left_gripper = EndEffectorDescription("left_gripper", "l_gripper_palm_link", "l_gripper_tool_frame",
                                       pr2_description.urdf_object)
 left_gripper.add_static_joint_states(GripperState.OPEN, {'l_gripper_l_finger_joint': 0.548,
-                                              'l_gripper_r_finger_joint': 0.548})
+                                                         'l_gripper_r_finger_joint': 0.548})
 left_gripper.add_static_joint_states(GripperState.CLOSE, {'l_gripper_l_finger_joint': 0.0,
-                                               'l_gripper_r_finger_joint': 0.0})
+                                                          'l_gripper_r_finger_joint': 0.0})
 left_gripper.end_effector_type = GripperType.PARALLEL
 left_gripper.opening_distance = 0.548
 left_arm.end_effector = left_gripper
@@ -48,18 +58,29 @@ pr2_description.add_kinematic_chain_description(right_arm)
 right_gripper = EndEffectorDescription("right_gripper", "r_gripper_palm_link", "r_gripper_tool_frame",
                                        pr2_description.urdf_object)
 right_gripper.add_static_joint_states(GripperState.OPEN, {'r_gripper_l_finger_joint': 0.548,
-                                               'r_gripper_r_finger_joint': 0.548})
+                                                          'r_gripper_r_finger_joint': 0.548})
 right_gripper.add_static_joint_states(GripperState.CLOSE, {'r_gripper_l_finger_joint': 0.0,
-                                                'r_gripper_r_finger_joint': 0.0})
+                                                           'r_gripper_r_finger_joint': 0.0})
 right_gripper.end_effector_type = GripperType.PARALLEL
 right_gripper.opening_distance = 0.548
 right_arm.end_effector = right_gripper
-
 
 ################################## Camera ##################################
 camera = CameraDescription("kinect_camera", "wide_stereo_optical_frame", 1.27,
                            1.60, 0.99483, 0.75049)
 pr2_description.add_camera_description(camera)
+
+################################## Torso ##################################
+torso = KinematicChainDescription("torso", "base_link", "torso_lift_link",
+                                  pr2_description.urdf_object)
+
+torso.add_static_joint_states(TorsoState.HIGH, {"torso_lift_joint": 0.3})
+
+torso.add_static_joint_states(TorsoState.MID, {"torso_lift_joint": 0.15})
+
+torso.add_static_joint_states(TorsoState.LOW, {"torso_lift_joint": 0})
+
+pr2_description.add_kinematic_chain_description(torso)
 
 ################################## Neck ##################################
 pr2_description.add_kinematic_chain("neck", "head_pan_link", "head_tilt_link")

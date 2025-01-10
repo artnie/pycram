@@ -1,26 +1,34 @@
 # used for delayed evaluation of typing until python 3.11 becomes mainstream
 from __future__ import annotations
 
-from typing_extensions import Tuple, List, Optional
-
-import matplotlib.pyplot as plt
 from dataclasses import dataclass
 
+import matplotlib.pyplot as plt
 import numpy as np
 import psutil
-import rospy
+import random_events
+import tf
 from matplotlib import colors
 from nav_msgs.msg import OccupancyGrid, MapMetaData
+from probabilistic_model.probabilistic_circuit.nx.helper import uniform_measure_of_event
+from probabilistic_model.probabilistic_circuit.nx.probabilistic_circuit import ProbabilisticCircuit
+from random_events.interval import Interval, reals, closed_open, closed
+from random_events.product_algebra import Event, SimpleEvent
+from random_events.variable import Continuous
+from tf.transformations import quaternion_from_matrix
+from typing_extensions import Tuple, List, Optional, Iterator
 
+from .datastructures.dataclasses import AxisAlignedBoundingBox, BoxVisualShape, Color
+from .datastructures.pose import Pose, Transform
+from .ros.logging import logwarn
+from .datastructures.dataclasses import AxisAlignedBoundingBox
+from .datastructures.pose import Pose
 from .datastructures.world import UseProspectionWorld
-from .world_concepts.world_object import Object
+from .datastructures.world import World
 from .description import Link
 from .local_transformer import LocalTransformer
-from .datastructures.pose import Pose, Transform
-from .datastructures.world import World
-from .datastructures.dataclasses import AxisAlignedBoundingBox, BoxVisualShape, Color
-
-import pybullet as p
+from .ros.ros_tools import wait_for_message
+from .world_concepts.world_object import Object
 
 
 @dataclass
@@ -111,42 +119,21 @@ class Costmap:
         # Creation of the visual shapes, for documentation of the visual shapes
         # please look here: https://docs.google.com/document/d/10sXEhzFRSnvFcl3XxNGhnD4N2SedqwdAvK3dsihxVUA/edit#heading=h.q1gn7v6o58bf
         for box in boxes:
-            visual = p.createVisualShape(p.GEOM_BOX,
-                                         halfExtents=[(box[1] * self.resolution) / 2, (box[2] * self.resolution) / 2,
-                                                      0.001],
-                                         rgbaColor=[1, 0, 0, 0.6],
-                                         visualFramePosition=[(box[0][0] + box[1] / 2) * self.resolution,
-                                                              (box[0][1] + box[2] / 2) * self.resolution, 0.])
+            box = BoxVisualShape(Color(1, 0, 0, 0.6),
+                                 [(box[0][0] + box[1] / 2) * self.resolution,
+                                  (box[0][1] + box[2] / 2) * self.resolution, 0.],
+                                 [(box[1] * self.resolution) / 2, (box[2] * self.resolution) / 2, 0.001])
+            visual = self.world.create_visual_shape(box)
             cells.append(visual)
         # Set to 127 for since this is the maximal amount of links in a multibody
         for cell_parts in self._chunks(cells, 127):
-            # Dummy paramater since these are needed to spawn visual shapes as a
-            # multibody.
-            link_poses = [[0, 0, 0] for c in cell_parts]
-            link_orientations = [[0, 0, 0, 1] for c in cell_parts]
-            link_masses = [1.0 for c in cell_parts]
-            link_parent = [0 for c in cell_parts]
-            link_joints = [p.JOINT_FIXED for c in cell_parts]
-            link_collision = [-1 for c in cell_parts]
-            link_joint_axis = [[1, 0, 0] for c in cell_parts]
-            # The position at which the multibody will be spawned. Offset such that
-            # the origin referes to the centre of the costmap.
-            # origin_pose = self.origin.position_as_list()
-            # base_pose = [origin_pose[0] - self.height / 2 * self.resolution,
-            #              origin_pose[1] - self.width / 2 * self.resolution, origin_pose[2]]
-
             offset = [[-self.height / 2 * self.resolution, -self.width / 2 * self.resolution, 0.05], [0, 0, 0, 1]]
-            new_pose = p.multiplyTransforms(self.origin.position_as_list(), self.origin.orientation_as_list(),
-                                            offset[0], offset[1])
-
-            map_obj = p.createMultiBody(baseVisualShapeIndex=-1, linkVisualShapeIndices=cell_parts,
-                                        basePosition=new_pose[0], baseOrientation=new_pose[1], linkPositions=link_poses,
-                                        # [0, 0, 1, 0]
-                                        linkMasses=link_masses, linkOrientations=link_orientations,
-                                        linkInertialFramePositions=link_poses,
-                                        linkInertialFrameOrientations=link_orientations, linkParentIndices=link_parent,
-                                        linkJointTypes=link_joints, linkJointAxis=link_joint_axis,
-                                        linkCollisionShapeIndices=link_collision)
+            origin_transform = (Transform(self.origin.position_as_list(), self.origin.orientation_as_list())
+                                .get_homogeneous_matrix())
+            offset_transform = (Transform(offset[0], offset[1]).get_homogeneous_matrix())
+            new_pose_transform = np.dot(origin_transform, offset_transform)
+            new_pose = Pose(new_pose_transform[:3, 3].tolist(), quaternion_from_matrix(new_pose_transform))
+            map_obj = self.world.create_multi_body_from_visual_shapes(cell_parts, new_pose)
             self.vis_ids.append(map_obj)
 
     def _chunks(self, lst: List, n: int) -> List:
@@ -165,7 +152,7 @@ class Costmap:
         Removes the visualization from the World.
         """
         for v_id in self.vis_ids:
-            self.world.remove_object_by_id(v_id)
+            self.world.remove_visual_object(v_id)
         self.vis_ids = []
 
     def _find_consectuive_line(self, start: Tuple[int, int], map: np.ndarray) -> int:
@@ -230,10 +217,15 @@ class Costmap:
         elif self.resolution != other_cm.resolution:
             raise ValueError("To merge two costmaps their resolution must be equal.")
         new_map = np.zeros((self.height, self.width))
-        # A nunpy array of the positions where both costmaps are greater than 0
+        # A numpy array of the positions where both costmaps are greater than 0
         merge = np.logical_and(self.map > 0, other_cm.map > 0)
         new_map[merge] = self.map[merge] * other_cm.map[merge]
-        new_map = (new_map / np.max(new_map)).reshape((self.height, self.width))
+        max_val = np.max(new_map)
+        if max_val != 0:
+            new_map = (new_map / np.max(new_map)).reshape((self.height, self.width))
+        else:
+            new_map = new_map.reshape((self.height, self.width))
+            logwarn("Merged costmap is empty.")
         return Costmap(self.resolution, self.height, self.width, self.origin, new_map)
 
     def __add__(self, other: Costmap) -> Costmap:
@@ -337,6 +329,8 @@ class OccupancyCostmap(Costmap):
         else:
             self.size = size
             self.origin = Pose() if not origin else origin
+            lt = LocalTransformer()
+            self.origin = lt.transform_pose(self.origin, "map")
             self.resolution = resolution
             self.distance_obstacle = max(int(distance_to_obstacle / self.resolution), 1)
             self.map = self._create_from_world(size, resolution)
@@ -366,7 +360,7 @@ class OccupancyCostmap(Costmap):
         :return: The costmap as a numpy array.
         """
         print("Waiting for Map")
-        map = rospy.wait_for_message("/map", OccupancyGrid)
+        map = wait_for_message("/map", OccupancyGrid)
         print("Recived Map")
         return np.array(map.data)
 
@@ -379,7 +373,7 @@ class OccupancyCostmap(Costmap):
         :return: The meta-data for the costmap array.
         """
         print("Waiting for Map Meta Data")
-        meta = rospy.wait_for_message("/map_metadata", MapMetaData)
+        meta = wait_for_message("/map_metadata", MapMetaData)
         print("Recived Meta Data")
         return meta
 
@@ -460,8 +454,8 @@ class OccupancyCostmap(Costmap):
         # 16383 is the maximal number of rays that can be processed in a batch
         i = 0
         j = 0
+        floor_id = self.world.get_object_by_name("floor").id
         for n in self._chunks(np.array(rays), 16380):
-            # with UseProspectionWorld():
             r_t = World.current_world.ray_test_batch(n[:, 0], n[:, 1], num_threads=0)
             while r_t is None:
                 r_t = World.current_world.ray_test_batch(n[:, 0], n[:, 1], num_threads=0)
@@ -469,10 +463,10 @@ class OccupancyCostmap(Costmap):
             if World.robot:
                 attached_objs_id = [o.id for o in self.world.robot.attachments.keys()]
                 res[i:j] = [
-                    1 if ray[0] == -1 or ray[0] == self.world.robot.id or ray[0] in attached_objs_id else 0 for
+                    1 if ray[0] in [-1, self.world.robot.id, floor_id] + attached_objs_id else 0 for
                     ray in r_t]
             else:
-                res[i:j] = [1 if ray[0] == -1 else 0 for ray in r_t]
+                res[i:j] = [1 if ray[0] in [-1, floor_id] else 0 for ray in r_t]
             i += len(n)
 
         res = np.flip(np.reshape(np.array(res), (size, size)))
@@ -520,7 +514,9 @@ class VisibilityCostmap(Costmap):
                  size: Optional[int] = 100,
                  resolution: Optional[float] = 0.02,
                  origin: Optional[Pose] = None,
-                 world: Optional[World] = None):
+                 world: Optional[World] = None,
+                 target_object: Optional[Object] = None,
+                 robot: Optional[Object] = None):
         """
         Visibility Costmaps show for every position around the origin pose if the origin can be seen from this pose.
         The costmap is able to deal with height differences of the camera while in a single position, for example, if
@@ -529,7 +525,7 @@ class VisibilityCostmap(Costmap):
         :param min_height: This is the minimal height the camera can be. This parameter
             is mostly relevant if the vertical position of the camera can change.
         :param max_height: This is the maximal height the camera can be. This is
-            mostly relevant if teh vertical position of the camera can change.
+            mostly relevant if the vertical position of the camera can change.
         :param size: The length of the side of the costmap, the costmap is created
             as a square.
         :param resolution: This parameter specifies how much meter a pixel in the
@@ -537,6 +533,8 @@ class VisibilityCostmap(Costmap):
         :param origin: The pose in world coordinate frame around which the
             costmap should be created.
         :param world: The World for which the costmap should be created.
+        :param target_object: The object that should be visible.
+        :param robot: The robot for which the visibility costmap should be created.
         """
         if (11 * size ** 2 + size ** 3) * 2 > psutil.virtual_memory().available:
             raise OSError("Not enough free RAM to calculate a costmap of this size")
@@ -550,8 +548,52 @@ class VisibilityCostmap(Costmap):
         # for pr2 = 1.6
         self.min_height: float = min_height
         self.origin: Pose = Pose() if not origin else origin
+        self.target_object: Optional[Object] = target_object
+        self.robot: Optional[Object] = robot
         self._generate_map()
         Costmap.__init__(self, resolution, size, size, self.origin, self.map)
+
+    @property
+    def robot(self) -> Optional[Object]:
+        return self._robot
+
+    @robot.setter
+    def robot(self, robot: Optional[Object]) -> None:
+        if robot is not None:
+            self._robot = World.current_world.get_prospection_object_for_object(robot)
+            self.robot_original_pose = self._robot.pose
+        else:
+            self._robot = None
+            self.robot_original_pose = None
+
+    @property
+    def target_object(self) -> Optional[Object]:
+        return self._target_object
+
+    @target_object.setter
+    def target_object(self, target_object: Optional[Object]) -> None:
+        if target_object is not None:
+            self._target_object = World.current_world.get_prospection_object_for_object(target_object)
+            self.target_original_pose = self._target_object.pose
+        else:
+            self._target_object = None
+            self.target_original_pose = None
+
+    def move_target_and_robot_far_away(self):
+        if self.target_object is not None:
+            self.target_object.set_pose(Pose([self.origin.position.x + self.size * self.resolution * 2,
+                                              self.origin.position.y + self.size * self.resolution * 2,
+                                              self.target_original_pose.position.z]))
+        if self.robot is not None:
+            self.robot.set_pose(Pose([self.origin.position.x + self.size * self.resolution * 3,
+                                      self.origin.position.y + self.size * self.resolution * 3,
+                                      self.robot_original_pose.position.z]))
+
+    def return_target_and_robot_to_their_original_position(self):
+        if self.target_original_pose is not None:
+            self.target_object.set_pose(self.target_original_pose)
+        if self.robot_original_pose is not None:
+            self.robot.set_pose(self.robot_original_pose)
 
     def _create_images(self) -> List[np.ndarray]:
         """
@@ -564,6 +606,8 @@ class VisibilityCostmap(Costmap):
         """
         images = []
         camera_pose = self.origin
+
+        self.move_target_and_robot_far_away()
 
         with UseProspectionWorld():
             origin_copy = self.origin.copy()
@@ -583,8 +627,11 @@ class VisibilityCostmap(Costmap):
             origin_copy.position.x += 1
             images.append(self.world.get_images_for_target(origin_copy, camera_pose, size=self.size)[1])
 
-        for i in range(0, 4):
-            images[i] = self._depth_buffer_to_meter(images[i])
+        self.return_target_and_robot_to_their_original_position()
+
+        if not World.current_world.conf.depth_images_are_in_meter:
+            for i in range(0, 4):
+                images[i] = self._depth_buffer_to_meter(images[i])
         return images
 
     def _depth_buffer_to_meter(self, buffer: np.ndarray) -> np.ndarray:
@@ -753,27 +800,44 @@ class SemanticCostmap(Costmap):
     table surface.
     """
 
-    def __init__(self, object, urdf_link_name, size=100, resolution=0.02, world=None):
+    def __init__(self, obj: Object, link_name: str, resolution: float = 0.02, world: Optional[World] = None):
         """
         Creates a semantic costmap for the given parameter. The semantic costmap will be on top of the link of the given
         Object.
 
-        :param object: The object of which the link is a part
-        :param urdf_link_name: The link name, as stated in the URDF
-        :param resolution: Resolution of the final costmap
+        :param obj: The object of which the link is a part
+        :param link_name: The link name, as stated in the description of the object
+        :param resolution: Resolution of the final costmap (how much meters one pixel represents)
         :param world: The World from which the costmap should be created
         """
         self.world: World = world if world else World.current_world
-        self.object: Object = object
-        self.link: Link = object.get_link(urdf_link_name)
+        self.object: Object = obj
+        self.link: Link = obj.get_link(link_name)
         self.resolution: float = resolution
-        self.origin: Pose = object.get_link_pose(urdf_link_name)
+        self.origin: Pose = obj.get_link_pose(link_name)
         self.height: int = 0
         self.width: int = 0
         self.map: np.ndarray = []
         self.generate_map()
 
         Costmap.__init__(self, resolution, self.height, self.width, self.origin, self.map)
+
+    def get_edges_map(self, margin_in_meters: float, horizontal_only: bool = False) -> Costmap:
+        """
+        Return a Costmap with only the edges of the original Costmap marked as possible positions.
+
+        :param margin_in_meters: The edge thickness in meters that should be marked as possible positions.
+        :param horizontal_only: If True only the horizontal edges will be marked as possible positions.
+        :return: The modified Costmap.
+        """
+        mask = np.zeros(self.map.shape)
+        edge_tolerance = int(margin_in_meters / self.resolution)
+        mask[:edge_tolerance] = 1
+        mask[-edge_tolerance:] = 1
+        if not horizontal_only:
+            mask[:, :edge_tolerance] = 1
+            mask[:, -edge_tolerance:] = 1
+        return Costmap(self.resolution, self.height, self.width, self.origin, mask)
 
     def generate_map(self) -> None:
         """
@@ -787,19 +851,159 @@ class SemanticCostmap(Costmap):
 
     def get_aabb_for_link(self) -> AxisAlignedBoundingBox:
         """
-        Returns the axis aligned bounding box (AABB) of the link provided when creating this costmap. To try and let the
-        AABB as close to the actual object as possible, the Object will be rotated such that the link will be in the
-        identity orientation.
-
-        :return: Two points in world coordinate space, which span a rectangle
+        :return: The original untransformed (doesn't take the current pose of the link into consideration, since only
+        the size is important here not the pose) axis aligned bounding box (AABB) of the link provided when creating
+         this costmap.
         """
-        prospection_object = World.current_world.get_prospection_object_for_object(self.object)
-        with UseProspectionWorld():
-            prospection_object.set_orientation(Pose(orientation=[0, 0, 0, 1]))
-            link_pose_trans = self.link.transform
-            inverse_trans = link_pose_trans.invert()
-            prospection_object.set_orientation(inverse_trans.to_pose())
-            return self.link.get_axis_aligned_bounding_box()
+        return self.link.get_axis_aligned_bounding_box_from_geometry()
+
+
+class AlgebraicSemanticCostmap(SemanticCostmap):
+    """
+    Class for a semantic costmap that is based on an algebraic set-description of the valid area.
+    """
+    x: Continuous = Continuous("x")
+    """
+    The variable for height.
+    """
+
+    y: Continuous = Continuous("y")
+    """
+    The variable for width.
+    """
+
+    original_valid_area: Optional[SimpleEvent]
+    """
+    The original rectangle of the valid area.
+    """
+
+    valid_area: Optional[Event]
+    """
+    A description of the valid positions as set.
+    """
+
+    number_of_samples: int
+    """
+    The number of samples to generate for the iter.
+    """
+
+    def __init__(self, object, urdf_link_name, world=None, number_of_samples=1000):
+        super().__init__(object, urdf_link_name, world=world)
+        self.number_of_samples = number_of_samples
+
+    def check_valid_area_exists(self):
+        assert self.valid_area is not None, ("The map has to be created before semantics can be applied. "
+                                             "Call 'generate_map first'")
+
+    def left(self, margin=0.) -> Event:
+        """
+        Create an event left of the origins Y-Coordinate.
+        :param margin: The margin of the events left bound.
+        :return: The left event.
+        """
+        self.check_valid_area_exists()
+        y_origin = self.origin.position.y
+        left = self.original_valid_area[self.y].simple_sets[0].lower
+        left += margin
+        event = SimpleEvent(
+            {self.x: reals(), self.y: random_events.interval.open(left, y_origin)}).as_composite_set()
+        return event
+
+    def right(self, margin=0.) -> Event:
+        """
+        Create an event right of the origins Y-Coordinate.
+        :param margin: The margin of the events right bound.
+        :return: The right event.
+        """
+        self.check_valid_area_exists()
+        y_origin = self.origin.position.y
+        right = self.original_valid_area[self.y].simple_sets[0].upper
+        right -= margin
+        event = SimpleEvent({self.x: reals(), self.y: closed_open(y_origin, right)}).as_composite_set()
+        return event
+
+    def top(self, margin=0.) -> Event:
+        """
+        Create an event above the origins X-Coordinate.
+        :param margin: The margin of the events upper bound.
+        :return: The top event.
+        """
+        self.check_valid_area_exists()
+        x_origin = self.origin.position.x
+        top = self.original_valid_area[self.x].simple_sets[0].upper
+        top -= margin
+        event = SimpleEvent(
+            {self.x: random_events.interval.closed_open(x_origin, top), self.y: reals()}).as_composite_set()
+        return event
+
+    def bottom(self, margin=0.) -> Event:
+        """
+        Create an event below the origins X-Coordinate.
+        :param margin: The margin of the events lower bound.
+        :return: The bottom event.
+        """
+        self.check_valid_area_exists()
+        x_origin = self.origin.position.x
+        lower = self.original_valid_area[self.x].simple_sets[0].lower
+        lower += margin
+        event = SimpleEvent(
+            {self.x: random_events.interval.open(lower, x_origin), self.y: reals()}).as_composite_set()
+        return event
+
+    def inner(self, margin=0.2):
+        min_x = self.original_valid_area[self.x].simple_sets[0].lower
+        max_x = self.original_valid_area[self.x].simple_sets[0].upper
+        min_y = self.original_valid_area[self.y].simple_sets[0].lower
+        max_y = self.original_valid_area[self.y].simple_sets[0].upper
+
+        min_x += margin
+        max_x -= margin
+        min_y += margin
+        max_y -= margin
+
+        inner_event = SimpleEvent({self.x: closed(min_x, max_x),
+                                   self.y: closed(min_y, max_y)}).as_composite_set()
+        return inner_event
+
+    def border(self, margin=0.2):
+        return ~self.inner(margin)
+
+    def generate_map(self) -> None:
+        super().generate_map()
+        valid_area = Event()
+        for rectangle in self.partitioning_rectangles():
+            # rectangle.scale(1/self.resolution, 1/self.resolution)
+            rectangle.translate(self.origin.position.x, self.origin.position.y)
+            valid_area.simple_sets.add(SimpleEvent({self.x: closed(rectangle.x_lower, rectangle.x_upper),
+                                                    self.y: closed(rectangle.y_lower, rectangle.y_upper)}))
+
+        assert len(valid_area.simple_sets) == 1, ("The map at the basis of a Semantic costmap must be an axis aligned"
+                                                  "bounding box")
+        self.valid_area = valid_area
+        self.original_valid_area = self.valid_area.simple_sets[0]
+
+    def as_distribution(self) -> ProbabilisticCircuit:
+        model = uniform_measure_of_event(self.valid_area)
+        return model
+
+    def sample_to_pose(self, sample: np.ndarray) -> Pose:
+        """
+        Convert a sample from the costmap to a pose.
+        :param sample: The sample to convert
+        :return: The pose corresponding to the sample
+        """
+        x = sample[0]
+        y = sample[1]
+        position = [x, y, self.origin.position.z]
+        angle = np.arctan2(position[1] - self.origin.position.y, position[0] - self.origin.position.x) + np.pi
+        orientation = list(tf.transformations.quaternion_from_euler(0, 0, angle, axes="sxyz"))
+        return Pose(position, orientation, self.origin.frame)
+
+    def __iter__(self) -> Iterator[Pose]:
+        model = self.as_distribution()
+        samples = model.sample(self.number_of_samples)
+        for sample in samples:
+            yield self.sample_to_pose(sample)
 
 
 cmap = colors.ListedColormap(['white', 'black', 'green', 'red', 'blue'])
