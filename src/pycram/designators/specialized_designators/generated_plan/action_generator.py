@@ -10,7 +10,7 @@ import tkinter as tk
 from tkinter import ttk
 from typing_extensions import List, Optional
 from enum import Enum
-from pycram.plan_failures import ReasoningError
+from pycram.failures import ReasoningError
 import re
 
 
