@@ -5,7 +5,7 @@ from pathlib import Path
 from time import sleep
 
 import numpy as np
-from tf.transformations import quaternion_matrix
+from ..tf_transformations import quaternion_matrix
 from typing_extensions import List, Dict, Optional, Union, Tuple, Callable, Type
 
 import pycrap
@@ -13,16 +13,17 @@ from pycrap import PhysicalObject
 from .multiverse_communication.client_manager import MultiverseClientManager
 from .multiverse_communication.clients import MultiverseController, MultiverseReader, MultiverseWriter, MultiverseAPI
 from ..config.multiverse_conf import MultiverseConfig
-from ..datastructures.dataclasses import Color, ContactPointsList, ContactPoint
+from ..datastructures.dataclasses import Color, ContactPointsList, ContactPoint, RayResult
 from ..datastructures.enums import WorldMode, JointType, MultiverseBodyProperty, MultiverseJointPosition, \
     MultiverseJointCMD
 from ..datastructures.pose import Pose
 from ..datastructures.world import World
+from ..datastructures.world_entity import PhysicalBody
 from ..description import Link, Joint
 from ..object_descriptors.generic import ObjectDescription as GenericObjectDescription
 from ..object_descriptors.mjcf import ObjectDescription as MJCF, PrimitiveObjectFactory
 from ..robot_description import RobotDescription
-from ..ros.logging import logwarn
+from ..ros import  logwarn
 from ..utils import RayTestUtils, wxyz_to_xyzw, xyzw_to_wxyz, adjust_camera_pose_based_on_target
 from ..validation.goal_validator import validate_object_pose, validate_multiple_joint_positions, \
     validate_joint_position, validate_multiple_object_poses
@@ -55,12 +56,12 @@ class Multiverse(World):
     Add the MJCF description extension to the extension to description type mapping for the objects.
     """
 
-    def __init__(self, is_prospection_world: Optional[bool] = False,
+    def __init__(self, is_prospection: Optional[bool] = False,
                  clear_cache: bool = False):
         """
         Initialize the Multiverse Socket and the PyCram World.
 
-        :param is_prospection_world: Whether the world is prospection or not.
+        :param is_prospection: Whether the world is prospection or not.
         :param clear_cache: Whether to clear the cache or not.
         """
 
@@ -68,11 +69,11 @@ class Multiverse(World):
         self.saved_simulator_states: Dict = {}
         self.make_sure_multiverse_resources_are_added(clear_cache=clear_cache)
 
-        self.simulation = self.conf.prospection_world_prefix if is_prospection_world else "belief_state"
+        self.simulation = self.conf.prospection_world_prefix if is_prospection else "belief_state"
         self.client_manager = MultiverseClientManager(self.conf.simulation_wait_time_factor)
-        self._init_clients(is_prospection=is_prospection_world)
+        self._init_clients(is_prospection=is_prospection)
 
-        World.__init__(self, WorldMode.DIRECT, is_prospection_world)
+        World.__init__(self, mode=WorldMode.DIRECT, is_prospection=is_prospection)
 
         self._init_constraint_and_object_id_name_map_collections()
 
@@ -544,6 +545,20 @@ class Multiverse(World):
     def perform_collision_detection(self) -> None:
         ...
 
+    def get_body_contact_points(self, body: PhysicalBody) -> ContactPointsList:
+        if isinstance(body, Object):
+            return self.get_object_contact_points(body)
+        else:
+            multiverse_contact_points = self.api_requester.get_contact_points(body.name)
+            contact_points = ContactPointsList([])
+            for mcp in multiverse_contact_points:
+                body_object, body_link = self.get_object_with_body_name(mcp.body_2)
+                obj, obj_link = self.get_object_with_body_name(mcp.body_1)
+                contact_points.append(ContactPoint(obj_link, body_link))
+                contact_points[-1].normal_on_body_b = mcp.normal
+                contact_points[-1].position_on_b = mcp.position
+            return contact_points
+
     def get_object_contact_points(self, obj: Object, ignore_attached_objects: bool = True) -> ContactPointsList:
         """
         Note: Currently Multiverse only gets one contact point per contact objects.
@@ -564,7 +579,7 @@ class Multiverse(World):
             body_object, body_link = self.get_object_with_body_name(mcp.body_2)
             obj_link = obj.links[mcp.body_1] if mcp.body_1 in obj.links.keys() else obj.root_link
             contact_points.append(ContactPoint(obj_link, body_link))
-            contact_points[-1].normal_on_b = mcp.normal
+            contact_points[-1].normal_on_body_b = mcp.normal
             contact_points[-1].position_on_b = mcp.position
         return contact_points
 
@@ -607,45 +622,38 @@ class Multiverse(World):
         contact_force_array = obj_rot_matrix @ np.array(contact_force).reshape(3, 1)
         return contact_force_array.flatten().tolist()[2]
 
-    def get_contact_points_between_two_objects(self, obj1: Object, obj2: Object) -> ContactPointsList:
+    def get_contact_points_between_two_bodies(self, obj1: Object, obj2: Object) -> ContactPointsList:
         obj1_contact_points = self.get_object_contact_points(obj1)
         return obj1_contact_points.get_points_of_object(obj2)
 
-    def ray_test(self, from_position: List[float], to_position: List[float]) -> Optional[int]:
-        ray_test_result = self.ray_test_batch([from_position], [to_position])[0]
-        return ray_test_result[0] if ray_test_result[0] != -1 else None
+    def _ray_test(self, from_position: List[float], to_position: List[float]) -> RayResult:
+        return self.ray_test_batch([from_position], [to_position])[0]
 
-    def ray_test_batch(self, from_positions: List[List[float]],
-                       to_positions: List[List[float]],
-                       num_threads: int = 1,
-                       return_distance: bool = False) -> Union[List, Tuple[List, List[float]]]:
+    def _ray_test_batch(self, from_positions: List[List[float]],
+                        to_positions: List[List[float]],
+                        num_threads: int = 1,
+                        return_distance: bool = False) -> List[RayResult]:
         """
         Note: Currently, num_threads is not used in Multiverse.
         """
         ray_results = self.api_requester.get_objects_intersected_with_rays(from_positions, to_positions)
-        results = []
-        distances = []
+        results: List[RayResult] = []
         for ray_result in ray_results:
-            results.append([])
-            if ray_result.intersected():
+            results.append(RayResult(-1))
+            if ray_result.intersected:
                 body_name = ray_result.body_name
                 if body_name == "world":
-                    results[-1].append(0)  # The floor id, which is always 0 since the floor is spawned first.
+                    results[-1].obj_id = 0  # The floor id, which is always 0 since the floor is spawned first.
                 elif body_name in self.object_name_to_id.keys():
-                    results[-1].append(self.object_name_to_id[body_name])
+                    results[-1].obj_id = self.object_name_to_id[body_name]
                 else:
                     for obj in self.objects:
                         if body_name in obj.links.keys():
-                            results[-1].append(obj.id)
+                            results[-1].obj_id = obj.id
                             break
-            else:
-                results[-1].append(-1)
             if return_distance:
-                distances.append(ray_result.distance)
-        if return_distance:
-            return results, distances
-        else:
-            return results
+                results[-1].distance = ray_result.distance
+        return results
 
     def step(self, func: Optional[Callable[[], None]] = None, step_seconds: Optional[float] = None) -> None:
         """

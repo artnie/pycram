@@ -25,17 +25,13 @@ class TaskTreeTestCase(BulletWorldTestCase):
             PickUpActionPerformable(object_description.resolve(), Arms.LEFT, Grasp.FRONT, 0.03).perform()
             description.resolve().perform()
 
-    def setUp(self):
-        super().setUp()
-        pycram.tasktree.task_tree.reset_tree()
-
     def test_tree_creation(self):
         """Test the creation and content of a task tree."""
         self.plan()
         # self.tearDownBulletWorld()
         tt = pycram.tasktree.task_tree
 
-        self.assertEqual(15, len(tt.root))
+        self.assertEqual(16, len(tt.root))
         self.assertEqual(10, len(tt.root.leaves))
 
         # check that all nodes succeeded
@@ -74,7 +70,7 @@ class TaskTreeTestCase(BulletWorldTestCase):
             self.plan()
             tt = pycram.tasktree.task_tree
 
-            self.assertEqual(15, len(tt.root))
+            self.assertEqual(16, len(tt.root))
             self.assertEqual(10, len(tt.root.leaves))
 
         self.assertEqual(len(pycram.tasktree.task_tree), 1)

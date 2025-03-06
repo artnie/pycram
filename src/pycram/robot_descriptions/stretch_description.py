@@ -1,8 +1,13 @@
-from ..ros.ros_tools import get_ros_package_path
+import numpy as np
+from ..tf_transformations import quaternion_from_euler
+
+from ..pose_generator_and_validator import PoseGenerator
+from ..ros import  get_ros_package_path
 
 from ..robot_description import RobotDescription, KinematicChainDescription, EndEffectorDescription, \
     CameraDescription, RobotDescriptionManager
-from ..datastructures.enums import GripperState, Arms, Grasp, TorsoState
+from ..datastructures.enums import GripperState, Arms, Grasp, TorsoState, GripperType, StaticJointState
+from ..units import meter
 
 filename = get_ros_package_path('pycram') + '/resources/robots/' + "stretch_description" + '.urdf'
 
@@ -12,7 +17,7 @@ stretch_description = RobotDescription("stretch_description", "base_link", "link
 arm_description = KinematicChainDescription("arm", "link_mast", "link_wrist_roll", stretch_description.urdf_object,
                                             arm_type=Arms.RIGHT)
 
-arm_description.add_static_joint_states("park", {'joint_lift': 0.0,
+arm_description.add_static_joint_states(StaticJointState.Park, {'joint_lift': 0.0,
                                                  'joint_arm_l3': 0.0,
                                                  'joint_arm_l2': 0.0,
                                                  'joint_arm_l1': 0.0,
@@ -31,7 +36,8 @@ gripper_description.add_static_joint_states(GripperState.OPEN, {'joint_gripper_f
                                                                 'joint_gripper_finger_right': 0.59})
 gripper_description.add_static_joint_states(GripperState.CLOSE, {'joint_gripper_finger_left': 0.0,
                                                                  'joint_gripper_finger_right': 0.0})
-
+gripper_description.end_effector_type = GripperType.PARALLEL
+gripper_description.opening_distance = 0.14 * meter  # assumption
 arm_description.end_effector = gripper_description
 
 ################################## Neck ##################################
@@ -67,6 +73,24 @@ stretch_description.add_grasp_orientations({Grasp.FRONT: [0, 0, 0, 1],
                                             Grasp.LEFT: [0, 0, -1, 1],
                                             Grasp.RIGHT: [0, 0, 1, 1],
                                             Grasp.TOP: [0, 1, 0, 1]})
+
+################################### Custom Orientation Generator ##############
+def stretch_orientation_generator(position, origin):
+    angle = np.arctan2(position[1] - origin.position.y, position[0] - origin.position.x) + np.pi + np.pi / 16
+    quaternion = list(quaternion_from_euler(0, 0, angle + np.pi / 2, axes="sxyz"))
+    return quaternion
+
+################################ Load Function #################################
+def load(description):
+    RobotDescriptionManager.current_robot_description = description
+    PoseGenerator.override_orientation_generator = stretch_orientation_generator
+
+def unload(description):
+    RobotDescriptionManager.current_robot_description = None
+    PoseGenerator.override_orientation_generator = None
+
+stretch_description.load = load
+stretch_description.unload = unload
 
 # Add to RobotDescriptionManager
 rdm = RobotDescriptionManager()

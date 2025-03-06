@@ -48,13 +48,13 @@ from pycram.designators.object_designator import *
 from pycram.datastructures.pose import Pose
 from pycram.orm.base import ProcessMetaData
 import anytree
-import pycrap
+from pycrap.ontologies import Robot, Kitchen, Milk, Cereal
 
 world = BulletWorld(WorldMode.DIRECT)
-pr2 = Object("pr2", pycrap.Robot, "pr2.urdf")
-kitchen = Object("kitchen", pycrap.Kitchen, "kitchen.urdf")
-milk = Object("milk", pycrap.Milk, "milk.stl", pose=Pose([1.3, 1, 0.9]))
-cereal = Object("cereal", pycrap.Cereal, "breakfast_cereal.stl", pose=Pose([1.3, 0.7, 0.95]))
+pr2 = Object("pr2", Robot, "pr2.urdf")
+kitchen = Object("kitchen", Kitchen, "kitchen.urdf")
+milk = Object("milk", Milk, "milk.stl", pose=Pose([1.3, 1, 0.9]))
+cereal = Object("cereal", Cereal, "breakfast_cereal.stl", pose=Pose([1.3, 0.7, 0.95]))
 milk_desig = ObjectDesignatorDescription(names=["milk"])
 cereal_desig = ObjectDesignatorDescription(names=["cereal"])
 robot_desig = ObjectDesignatorDescription(names=["pr2"]).resolve()
@@ -173,6 +173,9 @@ class SayingActionPerformable(ActionAbstract):
     @with_tree
     def plan(self) -> None:
         print(self.text)
+
+    def validate(self, result=None):
+        pass
 ```
 
 Now we got our new ActionDesignator called Saying and its ORM version. Since this class got created after all other classes got inserted into the database (in the beginning of the notebook) we have to insert it manually. 

@@ -2,7 +2,7 @@ import logging
 from datetime import timedelta
 
 import rospy
-from tf.transformations import quaternion_from_euler
+from ..tf_transformations import quaternion_from_euler
 from typing_extensions import Type
 
 import pycrap
@@ -19,7 +19,7 @@ from pycram.world_concepts.world_object import Object
 from pycram.worlds.bullet_world import BulletWorld
 from pycram.worlds.multiverse import Multiverse
 from pycram.ros_utils.viz_marker_publisher import VizMarkerPublisher
-from pycrap import PhysicalObject
+from pycrap.ontologies import PhysicalObject
 
 
 @with_simulated_robot

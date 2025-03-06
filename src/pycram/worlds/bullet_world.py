@@ -7,22 +7,25 @@ import time
 
 import numpy as np
 import pycram_bullet as p
+import yaml
 from geometry_msgs.msg import Point
 from typing_extensions import List, Optional, Dict, Any, Callable
 
-from pycrap import Floor
+from pycrap.ontologies import Floor
 from ..datastructures.dataclasses import Color, AxisAlignedBoundingBox, MultiBody, VisualShape, BoxVisualShape, \
-    ClosestPoint, LateralFriction, ContactPoint, ContactPointsList, ClosestPointsList
+    ClosestPoint, LateralFriction, ContactPoint, ContactPointsList, ClosestPointsList, RayResult
 from ..datastructures.enums import ObjectType, WorldMode, JointType
 from ..datastructures.pose import Pose
 from ..datastructures.world import World
+from ..datastructures.world_entity import PhysicalBody
 from ..object_descriptors.generic import ObjectDescription as GenericObjectDescription
 from ..object_descriptors.urdf import ObjectDescription
-from ..ros.logging import logwarn, loginfo
+from ..ros import  logwarn, loginfo
 from ..validation.goal_validator import (validate_multiple_joint_positions, validate_joint_position,
                                          validate_object_pose, validate_multiple_object_poses)
 from ..world_concepts.constraints import Constraint
 from ..world_concepts.world_object import Object
+from ..config.world_conf import WorldConfig
 
 Link = ObjectDescription.Link
 RootLink = ObjectDescription.RootLink
@@ -36,7 +39,7 @@ class BulletWorld(World):
     manipulate the Bullet World.
     """
 
-    def __init__(self, mode: WorldMode = WorldMode.DIRECT, is_prospection_world: bool = False,
+    def __init__(self, mode: WorldMode = WorldMode.DIRECT, is_prospection: bool = False,
                  use_multiverse_for_real_world_simulation: bool = False):
         """
         Creates a new simulation, the type decides of the simulation should be a rendered window or just run in the
@@ -44,10 +47,10 @@ class BulletWorld(World):
         The BulletWorld object also initializes the Events for attachment, detachment and for manipulating the world.
 
         :param mode: Can either be "GUI" for rendered window or "DIRECT" for non-rendered. The default is "GUI"
-        :param is_prospection_world: For internal usage, decides if this BulletWorld should be used as a shadow world.
+        :param is_prospection: For internal usage, decides if this BulletWorld should be used as a shadow world.
         :param use_multiverse_for_real_world_simulation: Whether to use the Multiverse for real world simulation.
         """
-        super().__init__(mode=mode, is_prospection_world=is_prospection_world)
+        super().__init__(mode=mode, is_prospection=is_prospection)
 
         if use_multiverse_for_real_world_simulation:
             self.add_multiverse_resources()
@@ -63,7 +66,7 @@ class BulletWorld(World):
         # Some default settings
         self.set_gravity([0, 0, -9.8])
 
-        if not is_prospection_world:
+        if not is_prospection:
             _ = Object("floor", Floor, "plane.urdf",
                        world=self)
 
@@ -191,29 +194,41 @@ class BulletWorld(World):
     def perform_collision_detection(self) -> None:
         p.performCollisionDetection(physicsClientId=self.id)
 
-    def get_object_contact_points(self, obj: Object) -> ContactPointsList:
-        """
-        Get the contact points of the object with akk other objects in the world. The contact points are returned as a
-        ContactPointsList object.
-
-        :param obj: The object for which the contact points should be returned.
-        :return: The contact points of the object with all other objects in the world.
-        """
+    def get_body_contact_points(self, body: PhysicalBody) -> ContactPointsList:
         self.perform_collision_detection()
-        points_list = p.getContactPoints(obj.id, physicsClientId=self.id)
+        body_data = self.get_body_and_link_id(body, index='A')
+        points_list = p.getContactPoints(**body_data, physicsClientId=self.id)
         return ContactPointsList([ContactPoint(**self.parse_points_list_to_args(point)) for point in points_list
                                   if len(point) > 0])
 
-    def get_contact_points_between_two_objects(self, obj_a: Object, obj_b: Object) -> ContactPointsList:
+    def get_contact_points_between_two_bodies(self, obj_a: PhysicalBody, obj_b: PhysicalBody) -> ContactPointsList:
         self.perform_collision_detection()
-        points_list = p.getContactPoints(obj_a.id, obj_b.id, physicsClientId=self.id)
+        body_a_data = self.get_body_and_link_id(obj_a, index='A')
+        body_b_data = self.get_body_and_link_id(obj_b, index='B')
+        points_list = p.getContactPoints(**body_a_data, **body_b_data, physicsClientId=self.id)
         return ContactPointsList([ContactPoint(**self.parse_points_list_to_args(point)) for point in points_list
                                   if len(point) > 0])
 
-    def get_closest_points_between_objects(self, obj_a: Object, obj_b: Object, distance: float) -> ClosestPointsList:
-        points_list = p.getClosestPoints(obj_a.id, obj_b.id, distance, physicsClientId=self.id)
+    def get_body_closest_points(self, body: PhysicalBody, max_distance: float) -> ClosestPointsList:
+        all_obj_closest_points = [self.get_closest_points_between_two_bodies(body, other_body, max_distance)
+                                  for other_body in self.objects if other_body != body]
+        return ClosestPointsList([point for closest_points in all_obj_closest_points for point in closest_points])
+
+    def get_closest_points_between_two_bodies(self, obj_a: PhysicalBody, obj_b: PhysicalBody,
+                                              max_distance: float) -> ClosestPointsList:
+        body_a_data = self.get_body_and_link_id(obj_a, index='A')
+        body_b_data = self.get_body_and_link_id(obj_b, index='B')
+        points_list = p.getClosestPoints(**body_a_data, **body_b_data, distance=max_distance, physicsClientId=self.id)
         return ClosestPointsList([ClosestPoint(**self.parse_points_list_to_args(point)) for point in points_list
                                   if len(point) > 0])
+
+    @staticmethod
+    def get_body_and_link_id(body: PhysicalBody, index='') -> Dict[str, int]:
+        body_id, link_id = (body.object_id, body.id) if isinstance(body, Link) else (body.id, None)
+        values_dict = {f"body{index}": body_id}
+        if link_id is not None:
+            values_dict.update({f"linkIndex{index}": link_id})
+        return values_dict
 
     def parse_points_list_to_args(self, point: List) -> Dict:
         """
@@ -222,11 +237,11 @@ class BulletWorld(World):
 
         :param point: The list of points.
         """
-        return {"link_a": self.get_object_by_id(point[1]).get_link_by_id(point[3]),
-                "link_b": self.get_object_by_id(point[2]).get_link_by_id(point[4]),
-                "position_on_object_a": point[5],
-                "position_on_object_b": point[6],
-                "normal_on_b": point[7],
+        return {"body_a": self.get_object_by_id(point[1]).get_link_by_id(point[3]),
+                "body_b": self.get_object_by_id(point[2]).get_link_by_id(point[4]),
+                "position_on_body_a": point[5],
+                "position_on_body_b": point[6],
+                "normal_on_body_b": point[7],
                 "distance": point[8],
                 "normal_force": point[9],
                 "lateral_friction_1": LateralFriction(point[10], point[11]),
@@ -361,7 +376,7 @@ class BulletWorld(World):
                               link_poses=[Pose(), Pose(), Pose()], link_masses=[1.0, 1.0, 1.0],
                               link_inertial_frame_poses=[Pose(), Pose(), Pose()], link_parent_indices=[0, 0, 0],
                               link_joint_types=[JointType.FIXED.value, JointType.FIXED.value, JointType.FIXED.value],
-                              link_joint_axis=[Point(1, 0, 0), Point(0, 1, 0), Point(0, 0, 1)],
+                              link_joint_axis=[Point(x=1, y=0, z=0), Point(x=0, y=1, z=0), Point(x=0, y=0, z=1)],
                               link_collision_shape_indices=[-1, -1, -1])
 
         body_id = self._create_multi_body(multibody)
@@ -376,14 +391,15 @@ class BulletWorld(World):
             p.removeBody(vis_id, physicsClientId=self.id)
         self.vis_axis = []
 
-    def ray_test(self, from_position: List[float], to_position: List[float]) -> int:
+    def _ray_test(self, from_position: List[float], to_position: List[float]) -> RayResult:
         res = p.rayTest(from_position, to_position, physicsClientId=self.id)
-        return res[0][0]
+        return RayResult(*res[0])
 
-    def ray_test_batch(self, from_positions: List[List[float]], to_positions: List[List[float]],
-                       num_threads: int = 1) -> List[int]:
-        return p.rayTestBatch(from_positions, to_positions, numThreads=num_threads,
-                              physicsClientId=self.id)
+    def _ray_test_batch(self, from_positions: List[List[float]], to_positions: List[List[float]],
+                        num_threads: int = 1) -> List[RayResult]:
+        result = p.rayTestBatch(from_positions, to_positions, numThreads=num_threads,
+                                physicsClientId=self.id)
+        return [RayResult(*r) for r in result] if result else None
 
     def _create_visual_shape(self, visual_shape: VisualShape) -> int:
         return p.createVisualShape(visual_shape.visual_geometry_type.value,
@@ -470,9 +486,10 @@ class Gui(threading.Thread):
         threading.Thread.__init__(self)
         self.world = world
         self.mode: WorldMode = mode
+        self.camera_button_id = -1
 
         # Checks if there is a display connected to the system. If not, the simulation will be run in direct mode.
-        if not "DISPLAY" in os.environ:
+        if "DISPLAY" not in os.environ:
             loginfo("No display detected. Running the simulation in direct mode.")
             self.mode = WorldMode.DIRECT
 
@@ -486,17 +503,22 @@ class Gui(threading.Thread):
             self.world.id = p.connect(p.DIRECT)
         else:
             self.world.id = p.connect(p.GUI)
+            self.camera_button_id = p.addUserDebugParameter("Save as Default Camera", 1, 0, 1, physicsClientId=self.world.id)
 
             # DISCLAIMER
-            # This camera control only works if the WorldMooe.GUI BulletWorld is the first one to be created. This is
+            # This camera control only works if the WorldMode.GUI BulletWorld is the first one to be created. This is
             # due to a bug in the function pybullet.getDebugVisualizerCamera() which only returns the information of
             # the first created simulation.
 
             # Disable the side windows of the GUI
             p.configureDebugVisualizer(p.COV_ENABLE_GUI, 0, physicsClientId=self.world.id)
             # Change the init camera pose
-            p.resetDebugVisualizerCamera(cameraDistance=1.5, cameraYaw=270.0, cameraPitch=-50,
-                                         cameraTargetPosition=[-2, 0, 1], physicsClientId=self.world.id)
+            default_camera_config = WorldConfig.default_camera_config
+            p.resetDebugVisualizerCamera(cameraDistance=default_camera_config["dist"],
+                                         cameraYaw=default_camera_config["yaw"],
+                                         cameraPitch=default_camera_config["pitch"],
+                                         cameraTargetPosition=default_camera_config["target_position"],
+                                         physicsClientId=self.world.id)
 
             # Get the initial camera target location
             camera_target_position = p.getDebugVisualizerCamera(physicsClientId=self.world.id)[11]
@@ -515,8 +537,8 @@ class Gui(threading.Thread):
             max_speed = 16
 
             # Set initial Camera Rotation
-            camera_yaw = 50
-            camera_pitch = -35
+            camera_yaw = default_camera_config["yaw"]
+            camera_pitch = default_camera_config["pitch"]
 
             # Keep track of the mouse state
             mouse_state = [0, 0, 0]
@@ -525,8 +547,24 @@ class Gui(threading.Thread):
             # Determines if the sphere at cameraTargetPosition is visible
             visible = 1
 
+            # Initial value for the camera button
+            last_button_value = 1
+
             # Loop to update the camera position based on keyboard events
             while p.isConnected(self.world.id):
+                # Check if Camera button was pressed
+                camera_button_value = p.readUserDebugParameter(self.camera_button_id)
+                if camera_button_value != last_button_value:
+                    last_button_value = camera_button_value
+
+                    current_camera_config = p.getDebugVisualizerCamera()[8:]
+                    v = dict(zip(["yaw", "pitch", "dist", "target_position"], current_camera_config))
+                    v["target_position"] = list(v["target_position"])
+                    yaml_path = os.path.join(os.path.dirname(__file__), "..", "config", 'camera.yaml')
+                    with open(yaml_path, "w") as f:
+                        yaml.dump(v, f)
+
+
                 # Monitor user input
                 keys = p.getKeyboardEvents(self.world.id)
                 mouse = p.getMouseEvents(self.world.id)

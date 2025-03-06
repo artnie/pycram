@@ -82,7 +82,7 @@ from pycram.datastructures.world import World
 from pycram.datastructures.pose import Pose
 from pycram.datastructures.dataclasses import ReasoningResult
 from pycram.costmaps import OccupancyCostmap
-from pycram.ros.logging import loginfo
+from pycram.ros import loginfo
 import numpy as np
 
 class ExampleKnowledge(KnowledgeSource, ReachableProperty, SpaceIsFreeProperty):
@@ -141,7 +141,7 @@ from pycram.datastructures.enums import WorldMode, ObjectType
 from pycram.knowledge.knowledge_engine import KnowledgeEngine
 from pycram.datastructures.pose import Pose
 from pycram.datastructures.property import ReachableProperty, SpaceIsFreeProperty
-from pycrap import Robot
+from pycrap.ontologies import Robot
 
 world = BulletWorld(WorldMode.GUI)
 pr2 = Object("pr2", Robot, "pr2.urdf")

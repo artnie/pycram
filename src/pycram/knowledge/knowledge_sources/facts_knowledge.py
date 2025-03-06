@@ -16,6 +16,7 @@ from ...pose_generator_and_validator import PoseGenerator, reachability_validato
 from ...robot_description import RobotDescription
 from ...world_reasoning import visible
 from ...costmaps import OccupancyCostmap, GaussianCostmap
+from ...units import meter
 
 if TYPE_CHECKING:
     from ...designators.object_designator import ObjectDesignatorDescription
@@ -81,8 +82,7 @@ class FactsKnowledge(KnowledgeSource, GripperIsFreeProperty, VisibleProperty, Sp
         with UseProspectionWorld():
             object_desig = object_designator.resolve() if hasattr(object_designator, "resolve") else object_designator
             pro_obj = World.current_world.get_prospection_object_for_object(object_desig.world_object)
-            pro_obj.set_pose(Pose([0, 0, 0], [0, 0, 0, 1]))
-            bounding_box = pro_obj.get_axis_aligned_bounding_box()
+            bounding_box = pro_obj.get_axis_aligned_bounding_box(False)
 
             obj_x = bounding_box.max_x - bounding_box.min_x
             obj_y = bounding_box.max_y - bounding_box.min_y
@@ -91,9 +91,9 @@ class FactsKnowledge(KnowledgeSource, GripperIsFreeProperty, VisibleProperty, Sp
                                      RobotDescription.current_robot_description.get_manipulator_chains()]
 
             for dist in gripper_opening_dists:
-                if dist > obj_y:
+                if dist > obj_y * meter:
                     return ReasoningResult(True, {"grasp": Grasp.FRONT})
-                elif dist > obj_x:
+                elif dist > obj_x * meter:
                     return ReasoningResult(True, {"grasp": Grasp.LEFT})
 
             return ReasoningResult(False)

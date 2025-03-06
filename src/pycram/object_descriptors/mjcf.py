@@ -6,16 +6,16 @@ from xml.etree import ElementTree as ET
 import numpy as np
 from dm_control import mjcf
 from geometry_msgs.msg import Point
-from typing_extensions import Union, List, Optional, Dict, Tuple
+from typing_extensions import Union, List, Optional, Dict, Tuple, Self
 
 from ..datastructures.dataclasses import Color, VisualShape, BoxVisualShape, CylinderVisualShape, \
     SphereVisualShape, MeshVisualShape, VisualShapeUnion
 from ..datastructures.enums import JointType, MJCFGeomType, MJCFJointType, Shape
 from ..datastructures.pose import Pose
 from ..description import JointDescription as AbstractJointDescription, \
-    LinkDescription as AbstractLinkDescription, ObjectDescription as AbstractObjectDescription
+    LinkDescription as AbstractLinkDescription, ObjectDescription as AbstractObjectDescription, ObjectDescription
 from ..failures import MultiplePossibleTipLinks
-from ..ros.ros_tools import get_parameter
+from ..ros import  get_parameter
 
 try:
     from multiverse_parser import Configuration, Factory, InertiaSource, GeomBuilder
@@ -144,7 +144,7 @@ class JointDescription(AbstractJointDescription):
         """
         :return: The axis of this joint, for example the rotation axis for a revolute joint.
         """
-        return Point(*self.parsed_description.axis)
+        return Point(**dict(zip(["x", "y", "z"], self.parsed_description)))
 
     @property
     def lower_limit(self) -> Union[float, None]:
@@ -356,6 +356,16 @@ class ObjectDescription(AbstractObjectDescription):
         self._joints = None
         self.virtual_joint_names = []
         self._meshes_dir: Optional[str] = None
+
+    def merge_description(self, other: ObjectDescription, parent_link: Optional[str] = None,
+                          child_link: Optional[str] = None,
+                          joint_type: JointType = JointType.FIXED,
+                          axis: Optional[Point] = None,
+                          lower_limit: Optional[float] = None, upper_limit: Optional[float] = None,
+                          child_pose_wrt_parent: Optional[Pose] = None,
+                          in_place: bool = False,
+                          new_description_file: Optional[str] = None) -> Union[ObjectDescription, Self]:
+        raise NotImplementedError
 
     @property
     def mesh_dir(self) -> Optional[str]:

@@ -1,5 +1,5 @@
 import unittest
-from pycram.ros.filter import Butterworth
+from pycram.filter import Butterworth
 
 class TestButterworthFilter(unittest.TestCase):
 
@@ -37,8 +37,9 @@ class TestButterworthFilter(unittest.TestCase):
         filter = Butterworth()
         data = [1]
         filtered_data = filter.filter(data)
-        expected_filtered_data = [0.026077721701092293]  # The expected filtered value
-        self.assertEqual(filtered_data.tolist(), expected_filtered_data)
+        expected_filtered_data = 0.026077721701092293  # The expected filtered value
+        # self.assertAlmostEquals(filtered_data.tolist()[0], expected_filtered_data)
+        self.assertAlmostEqual(filtered_data.tolist()[0], expected_filtered_data)
 
 if __name__ == '__main__':
     unittest.main()

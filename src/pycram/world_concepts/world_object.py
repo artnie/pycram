@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+from functools import cached_property
 from pathlib import Path
 
 import numpy as np
@@ -9,23 +10,23 @@ import owlready2
 from deprecated import deprecated
 from geometry_msgs.msg import Point, Quaternion
 from trimesh.parent import Geometry3D
-from typing_extensions import Type, Optional, Dict, Tuple, List, Union
+from typing_extensions import Type, Optional, Dict, Tuple, List, Union, Self
 
-import pycrap
 from ..datastructures.dataclasses import (Color, ObjectState, LinkState, JointState,
                                           AxisAlignedBoundingBox, VisualShape, ClosestPointsList,
                                           ContactPointsList, RotatedBoundingBox, VirtualJoint)
 from ..datastructures.enums import ObjectType, JointType
 from ..datastructures.pose import Pose, Transform
 from ..datastructures.world import World
-from ..datastructures.world_entity import WorldEntity
+from ..datastructures.world_entity import PhysicalBody, WorldEntity
 from ..description import ObjectDescription, LinkDescription, Joint
-from ..failures import ObjectAlreadyExists, WorldMismatchErrorBetweenObjects, UnsupportedFileExtension, \
+from ..failures import ObjectAlreadyExists, WorldMismatchErrorBetweenAttachedObjects, UnsupportedFileExtension, \
     ObjectDescriptionUndefined
 from ..local_transformer import LocalTransformer
 from ..object_descriptors.generic import ObjectDescription as GenericObjectDescription
 from ..object_descriptors.urdf import ObjectDescription as URDF
-from ..ros.logging import logwarn
+from ..ros import  Time
+from ..ros import  logwarn, logerr
 
 try:
     from ..object_descriptors.mjcf import ObjectDescription as MJCF
@@ -34,12 +35,15 @@ except ImportError:
 from ..robot_description import RobotDescriptionManager, RobotDescription
 from ..world_concepts.constraints import Attachment
 from ..datastructures.mixins import HasConcept
-from pycrap import PhysicalObject, ontology, Base, Agent
+from pycrap.ontologies import PhysicalObject, ontology, Base, Agent, Joint, \
+    has_child_link, has_parent_link, is_part_of, Robot, Link as CraxLink, Floor, Location, RootLink
+
+from pycrap.urdf_parser import parse_furniture, parse_joint_types
 
 Link = ObjectDescription.Link
 
 
-class Object(WorldEntity, HasConcept):
+class Object(PhysicalBody):
     """
     Represents a spawned Object in the World.
     """
@@ -60,7 +64,7 @@ class Object(WorldEntity, HasConcept):
                  description: Optional[ObjectDescription] = None,
                  pose: Optional[Pose] = None,
                  world: Optional[World] = None,
-                 color: Color = Color(),
+                 color: Optional[Color] = None,
                  ignore_cached_files: bool = False,
                  scale_mesh: Optional[float] = None,
                  mesh_transform: Optional[Transform] = None):
@@ -83,51 +87,99 @@ class Object(WorldEntity, HasConcept):
         :param scale_mesh: The scale of the mesh.
         """
 
-        super().__init__(-1, world if world is not None else World.current_world)
+        self.world = world if world is not None else World.current_world
+        self.name: str = name
+        super().__init__(-1, self.world, concept)
 
         pose = Pose() if pose is None else pose
 
         # set ontology related information
         self.ontology_concept = concept
-        if not self.world.is_prospection_world:
-            self.ontology_individual = self.ontology_concept(namespace=self.world.ontology.ontology)
-
-        self.name: str = name
         self.path: Optional[str] = path
 
-        self.color: Color = color
         self._resolve_description(path, description)
         self.cache_manager = self.world.cache_manager
 
         self.local_transformer = LocalTransformer()
         self.original_pose = self.local_transformer.transform_pose(pose, "map")
         self._current_pose = self.original_pose
+        self.scale_mesh = scale_mesh if scale_mesh is not None else 1.0
+        color = Color() if color is None else color
 
         if path is not None:
             self.path = self.world.preprocess_object_file_and_get_its_cache_path(path, ignore_cached_files,
                                                                                  self.description, self.name,
-                                                                                 scale_mesh=scale_mesh,
-                                                                                 mesh_transform=mesh_transform)
+                                                                                 scale_mesh=self.scale_mesh,
+                                                                                 mesh_transform=mesh_transform,
+                                                                                 color=color)
 
             self.description.update_description_from_file(self.path)
-
         # if the object is an agent in the belief state
-        if Agent in self.ontology_concept.is_a and not self.world.is_prospection_world:
+        if self.is_a_robot and not self.world.is_prospection_world:
             self._update_world_robot_and_description()
 
         self.id = self._spawn_object_and_get_id()
-
-        self.tf_frame = (self.tf_prospection_world_prefix if self.world.is_prospection_world else "") + self.name
 
         self._init_joint_name_and_id_map()
         self._init_link_name_and_id_map()
 
         self._init_links_and_update_transforms()
+
+        if color is not None:
+            self.color: Color = color
+
         self._init_joints()
 
         self.attachments: Dict[Object, Attachment] = {}
 
         self.world.add_object(self)
+
+    @property
+    def tf_frame(self) -> str:
+        """
+        The tf frame of the object.
+        """
+        return (self.tf_prospection_world_prefix if self.world.is_prospection_world else "") + self.name
+
+    @property
+    def color(self) -> Union[Color, Dict[str, Color]]:
+        """
+        Return the rgba_color of this object. The return is either:
+
+            1. A Color object with RGBA values, this is the case if the object only has one link (this
+                happens for example if the object is spawned from a .obj or .stl file)
+            2. A dict with the link name as key and the rgba_color as value. The rgba_color is given as a Color Object.
+                Please keep in mind that not every link may have a rgba_color. This is dependent on the URDF from which
+                 the object is spawned.
+
+        :return: The rgba_color as Color object with RGBA values between 0 and 1 or a dict with the link name as key and
+         the rgba_color as value.
+        """
+        link_to_color_dict = self.links_colors
+
+        if len(link_to_color_dict) == 1:
+            return list(link_to_color_dict.values())[0]
+        else:
+            return link_to_color_dict
+
+    @color.setter
+    def color(self, rgba_color: Union[Color, Dict[str, Color]]) -> None:
+        """
+        Change the color of this object.
+
+        :param rgba_color: The color as Color object with RGBA values between 0 and 1
+        """
+        # Check if there is only one link, this is the case for primitive
+        # forms or if loaded from an .stl or .obj file
+        if self.has_one_link:
+            self.root_link.color = rgba_color
+        else:
+            if isinstance(rgba_color, Color):
+                for link in self.links.values():
+                    link.color = rgba_color
+            else:
+                for link_name, color in rgba_color.items():
+                    self.links[link_name].color = color
 
     def get_mesh_path(self) -> str:
         """
@@ -294,7 +346,7 @@ class Object(WorldEntity, HasConcept):
         """
         The current pose of the object.
         """
-        return self.get_pose()
+        return self.world.get_object_pose(self)
 
     @pose.setter
     def pose(self, pose: Pose):
@@ -336,9 +388,9 @@ class Object(WorldEntity, HasConcept):
             return obj_id
 
         except Exception as e:
-            logging.error(
-                "The File could not be loaded. Please note that the path has to be either a URDF, stl or obj file or"
-                " the name of an URDF string on the parameter server.")
+            logerr(
+                f"The caught error: {e}, The File could not be loaded. Please note that the path has to be either"
+                f" a URDF, stl or obj file or the name of an URDF string on the parameter server.")
             os.remove(path)
             raise e
 
@@ -390,9 +442,19 @@ class Object(WorldEntity, HasConcept):
         for link_name, link_id in self.link_name_to_id.items():
             link_description = self.description.get_link_by_name(link_name)
             if link_name == self.description.get_root():
+                ontology_concept = RootLink
                 self.links[link_name] = self.description.RootLink(self)
+
             else:
                 self.links[link_name] = self.description.Link(link_id, link_description, self)
+                # If the link can be matched to a concept, assign it, else assign PhysicalObject as class.
+                if parse_furniture(link_name):
+                    ontology_concept = parse_furniture(link_name)
+                else:
+                    ontology_concept = PhysicalObject
+                if not self.world.is_prospection_world:
+                    # n_same_link = len(self.world.ontology.search(iri = f"{self.world.ontology.ontology.base_iri}{link_name}$*"))
+                    self.ontology_individual.is_a = [CraxLink]
 
         self.update_link_transforms()
 
@@ -405,7 +467,8 @@ class Object(WorldEntity, HasConcept):
         for joint_name, joint_id in self.joint_name_to_id.items():
             parsed_joint_description = self.description.get_joint_by_name(joint_name)
             is_virtual = self.is_joint_virtual(joint_name)
-            self.joints[joint_name] = self.description.Joint(joint_id, parsed_joint_description, self, is_virtual)
+            self.joints[joint_name] = self.description.Joint(joint_id, parsed_joint_description, self,
+                                                             is_virtual=is_virtual)
 
     def is_joint_virtual(self, name: str):
         """
@@ -595,20 +658,16 @@ class Object(WorldEntity, HasConcept):
         return np.array(self.get_position_as_list()) - np.array(self.get_base_position_as_list())
 
     def __repr__(self):
-        skip_attr = ["links", "joints", "description", "attachments"]
-        return self.__class__.__qualname__ + f"(name={self.name}, object_type={self.obj_type.name}, file_path={self.path}, pose={self.pose}, world={self.world})"
-
+        return self.__class__.__qualname__ + (f"(name={self.name}, object_type={self.obj_type.name},"
+                                              f" file_path={self.path}, pose={self.pose}, world={self.world})")
 
     def remove(self) -> None:
         """
         Remove this object from the World it currently resides in.
         For the object to be removed it has to be detached from all objects it
-        is currently attached to. After this call world remove object
-        to remove this Object from the simulation/world.
+        is currently attached to. Then remove this Object from the simulation/world.
         """
-        # owlready2.destroy_entity(self.ontology_individual)
         self.world.remove_object(self)
-
 
     def reset(self, remove_saved_states=False) -> None:
         """
@@ -632,16 +691,39 @@ class Object(WorldEntity, HasConcept):
 
         :return: True if the object is of type environment, False otherwise.
         """
-        return issubclass(self.obj_type, pycrap.Location) or issubclass(self.obj_type, pycrap.Floor)
+        return issubclass(self.obj_type, Location) or issubclass(self.obj_type, Floor)
 
     @property
     def is_a_robot(self) -> bool:
         """
         Check if the object is a robot.
-
+        TODO: Check if this is a the correct filter
         :return: True if the object is a robot, False otherwise.
         """
-        return issubclass(self.obj_type, pycrap.Robot)
+        return issubclass(self.obj_type, Robot)
+
+    def merge(self, other: Object, name: Optional[str] = None, pose: Optional[Pose] = None,
+              new_description_file: Optional[str] = None) -> Object:
+        """
+        Merge the object with another object. This is done by merging the descriptions of the objects,
+        removing the original objects creating a new merged object.
+
+        :param other: The object to merge with.
+        :param name: The name of the merged object.
+        :param pose: The pose of the merged object.
+        :param new_description_file: The new description file of the merged object.
+        :return: The merged object.
+        """
+        pose = self.pose if pose is None else pose
+        child_pose = self.local_transformer.transform_pose(other.pose, self.tf_frame)
+        description = self.description.merge_description(other.description, child_pose_wrt_parent=child_pose,
+                                                         new_description_file=new_description_file)
+        name = self.name if name is None else name
+        color = self.color if isinstance(self.color, Color) else self.color[self.root_link.name]
+        other.remove()
+        self.remove()
+        return Object(name, self.obj_type, description.xml_path, description=description, pose=pose, world=self.world,
+                      color=color)
 
     def attach(self,
                child_object: Object,
@@ -750,9 +832,7 @@ class Object(WorldEntity, HasConcept):
 
         :return: The current pose of this object
         """
-        if self.world.conf.update_poses_from_sim_on_get:
-            self.update_pose()
-        return self._current_pose
+        return self.pose
 
     def set_pose(self, pose: Pose, base: bool = False, set_attachments: bool = True) -> None:
         """
@@ -771,25 +851,8 @@ class Object(WorldEntity, HasConcept):
         if set_attachments:
             self._set_attached_objects_poses()
 
-    def reset_base_pose(self, pose: Pose):
-        if self.world.reset_object_base_pose(self, pose):
-            self.update_pose()
-
-    def update_pose(self):
-        """
-        Update the current pose of this object from the world, and updates the poses of all links.
-        """
-        self._current_pose = self.world.get_object_pose(self)
-        # TODO: Probably not needed, need to test
-        self._update_all_links_poses()
-        self.update_link_transforms()
-
-    def _update_all_links_poses(self):
-        """
-        Update the poses of all links by getting them from the simulator.
-        """
-        for link in self.links.values():
-            link.update_pose()
+    def reset_base_pose(self, pose: Pose) -> bool:
+        return self.world.reset_object_base_pose(self, pose)
 
     def move_base_to_origin_pose(self) -> None:
         """
@@ -798,15 +861,16 @@ class Object(WorldEntity, HasConcept):
         """
         self.set_pose(self.get_pose(), base=True)
 
-    def save_state(self, state_id) -> None:
+    def save_state(self, state_id: int, save_dir: Optional[str] = None) -> None:
         """
         Save the state of this object by saving the state of all links and attachments.
 
         :param state_id: The unique id of the state.
+        :param save_dir: The directory in which to save the state.
         """
         self.save_links_states(state_id)
         self.save_joints_states(state_id)
-        super().save_state(state_id)
+        super().save_state(state_id, save_dir)
 
     def save_links_states(self, state_id: int) -> None:
         """
@@ -831,8 +895,8 @@ class Object(WorldEntity, HasConcept):
         """
         The current state of this object as an ObjectState.
         """
-        return ObjectState(self.get_pose().copy(), self.attachments.copy(), self.link_states.copy(),
-                           self.joint_states.copy(), self.world.conf.get_pose_tolerance())
+        return ObjectState(self.body_state, self.attachments.copy(), self.link_states.copy(),
+                           self.joint_states.copy())
 
     @current_state.setter
     def current_state(self, state: ObjectState) -> None:
@@ -840,7 +904,7 @@ class Object(WorldEntity, HasConcept):
         Set the current state of this object to the given state.
         """
         if self.current_state != state:
-            self.set_pose(state.pose, base=False, set_attachments=False)
+            self.body_state = state.body_state
             self.set_attachments(state.attachments)
             self.link_states = state.link_states
             self.joint_states = state.joint_states
@@ -918,7 +982,7 @@ class Object(WorldEntity, HasConcept):
         :return: The attachment transform.
         """
         if self.world != child_object.world:
-            raise WorldMismatchErrorBetweenObjects(self, child_object)
+            raise WorldMismatchErrorBetweenAttachedObjects(self, child_object)
         att_transform = attachment.parent_to_child_transform.copy()
         if self.world.is_prospection_world and not attachment.parent_object.world.is_prospection_world:
             att_transform.frame = self.tf_prospection_world_prefix + att_transform.frame
@@ -965,6 +1029,8 @@ class Object(WorldEntity, HasConcept):
                 joint.current_state = joint_states[joint.id]
 
     def robot_virtual_move_base_joints_names(self):
+        if self.robot_description.virtual_mobile_base_joints is None:
+            return []
         return self.robot_description.virtual_mobile_base_joints.names
 
     def remove_saved_states(self) -> None:
@@ -1034,13 +1100,13 @@ class Object(WorldEntity, HasConcept):
             pose.frame = position.frame
         elif isinstance(position, Point):
             target_position = position
-        elif isinstance(position, List):
+        elif isinstance(position, (List, np.ndarray, tuple)):
             if len(position) == 3:
-                target_position = Point(*position)
+                target_position = Point(**dict(zip(["x", "y", "z"], position)))
             else:
-                raise ValueError("The given position has to be a list of 3 values.")
+                raise ValueError("The given position has to be a sequence of 3 values.")
         else:
-            raise TypeError("The given position has to be a Pose, Point or an iterable of xyz values.")
+            raise TypeError("The given position has to be a Pose, Point or a sequence of xyz values.")
 
         pose.position = target_position
         pose.orientation = self.get_orientation()
@@ -1061,7 +1127,7 @@ class Object(WorldEntity, HasConcept):
             target_orientation = orientation
         elif (isinstance(orientation, list) or isinstance(orientation, np.ndarray) or isinstance(orientation, tuple)) \
                 and len(orientation) == 4:
-            target_orientation = Quaternion(*orientation)
+            target_orientation = Quaternion(**dict(zip(["x", "y", "z", "w"], orientation)))
         else:
             raise TypeError("The given orientation has to be a Pose, Quaternion or one of list/tuple/ndarray of xyzw.")
 
@@ -1151,7 +1217,7 @@ class Object(WorldEntity, HasConcept):
         """
         self.clip_joint_positions_to_limits({joint_name: joint_position})
         if self.world.reset_joint_position(self.joints[joint_name], joint_position):
-            self._update_on_joint_position_change()
+            self._set_attached_objects_poses()
 
     @deprecated("Use set_multiple_joint_positions instead")
     def set_joint_positions(self, joint_positions: Dict[str, float]) -> None:
@@ -1167,7 +1233,7 @@ class Object(WorldEntity, HasConcept):
         joint_positions = {self.joints[joint_name]: joint_position
                            for joint_name, joint_position in joint_positions.items()}
         if self.world.set_multiple_joint_positions(joint_positions):
-            self._update_on_joint_position_change()
+            self._set_attached_objects_poses()
 
     def clip_joint_positions_to_limits(self, joint_positions: Dict[str, float]) -> Dict[str, float]:
         """
@@ -1180,12 +1246,6 @@ class Object(WorldEntity, HasConcept):
                                     self.joints[joint_name].upper_limit)
                 if self.joints[joint_name].has_limits else joint_position
                 for joint_name, joint_position in joint_positions.items()}
-
-    def _update_on_joint_position_change(self):
-        self.update_pose()
-        self._update_all_links_poses()
-        self.update_link_transforms()
-        self._set_attached_objects_poses()
 
     def get_joint_position(self, joint_name: str) -> float:
         """
@@ -1321,6 +1381,7 @@ class Object(WorldEntity, HasConcept):
         for link in self.links.values():
             link.update_transform(transform_time)
 
+    @property
     def contact_points(self) -> ContactPointsList:
         """
         Return a list of contact points of this Object with other Objects.
@@ -1337,7 +1398,7 @@ class Object(WorldEntity, HasConcept):
         """
         state_id = self.world.save_state()
         self.world.step()
-        contact_points = self.contact_points()
+        contact_points = self.contact_points
         self.world.restore_state(state_id)
         return contact_points
 
@@ -1348,7 +1409,7 @@ class Object(WorldEntity, HasConcept):
         :param max_distance: The maximum distance between the closest points
         :return: A list of closest points between this Object and other Objects
         """
-        return self.world.get_object_closest_points(self, max_distance)
+        return self.world.get_body_closest_points(self, max_distance)
 
     def closest_points_with_obj(self, other_object: Object, max_distance: float) -> ClosestPointsList:
         """
@@ -1358,42 +1419,13 @@ class Object(WorldEntity, HasConcept):
         :param max_distance: The maximum distance between the closest points
         :return: A list of closest points between this Object and the other Object
         """
-        return self.world.get_closest_points_between_objects(self, other_object, max_distance)
+        return self.world.get_closest_points_between_two_bodies(self, other_object, max_distance)
 
     def set_color(self, rgba_color: Color) -> None:
-        """
-        Change the color of this object, the color has to be given as a list
-        of RGBA values.
-
-        :param rgba_color: The color as Color object with RGBA values between 0 and 1
-        """
-        # Check if there is only one link, this is the case for primitive
-        # forms or if loaded from an .stl or .obj file
-        if self.links != {}:
-            for link in self.links.values():
-                link.color = rgba_color
-        else:
-            self.root_link.color = rgba_color
+        self.color = rgba_color
 
     def get_color(self) -> Union[Color, Dict[str, Color]]:
-        """
-        Return the rgba_color of this object. The return is either:
-
-            1. A Color object with RGBA values, this is the case if the object only has one link (this
-                happens for example if the object is spawned from a .obj or .stl file)
-            2. A dict with the link name as key and the rgba_color as value. The rgba_color is given as a Color Object.
-                Please keep in mind that not every link may have a rgba_color. This is dependent on the URDF from which
-                 the object is spawned.
-
-        :return: The rgba_color as Color object with RGBA values between 0 and 1 or a dict with the link name as key and
-         the rgba_color as value.
-        """
-        link_to_color_dict = self.links_colors
-
-        if len(link_to_color_dict) == 1:
-            return list(link_to_color_dict.values())[0]
-        else:
-            return link_to_color_dict
+        return self.color
 
     @property
     def links_colors(self) -> Dict[str, Color]:
@@ -1402,15 +1434,15 @@ class Object(WorldEntity, HasConcept):
         """
         return self.world.get_colors_of_object_links(self)
 
-    def get_axis_aligned_bounding_box(self, transform_to_object_pose: bool = True) -> AxisAlignedBoundingBox:
+    def get_axis_aligned_bounding_box(self, shift_to_object_position: bool = True) -> AxisAlignedBoundingBox:
         """
         Return the axis aligned bounding box of this object.
 
-        :param transform_to_object_pose: If True, the bounding box will be transformed to fit object pose.
+        :param shift_to_object_position: If True, the bounding box will be shifted to the object position.
         :return: The axis aligned bounding box of this object.
         """
         if self.has_one_link:
-            return self.root_link.get_axis_aligned_bounding_box(transform_to_object_pose)
+            return self.root_link.get_axis_aligned_bounding_box(shift_to_object_position)
         else:
             return self.world.get_object_axis_aligned_bounding_box(self)
 
@@ -1434,7 +1466,7 @@ class Object(WorldEntity, HasConcept):
         if self.has_one_link:
             return self.root_link.get_convex_hull()
         else:
-            return self.world.get_object_convex_hull(self)
+            return self.world.get_body_convex_hull(self)
 
     def get_base_origin(self) -> Pose:
         """
@@ -1484,10 +1516,9 @@ class Object(WorldEntity, HasConcept):
                      world, self.color)
         return obj
 
-    def __eq__(self, other):
-        return (isinstance(other, Object) and self.id == other.id and self.name == other.name
-                and self.world == other.world)
-
-    def __hash__(self):
-        return hash((self.id, self.name, self.world))
+    def parent_entity(self) -> World:
+        """
+        :return: The parent of this object which is the world.
+        """
+        return self.world
 

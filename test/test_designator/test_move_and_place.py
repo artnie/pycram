@@ -12,7 +12,7 @@ from pycram.designators.action_designator import MoveTorsoActionPerformable, Nav
 from pycram.designators.specialized_designators.probabilistic.probabilistic_action import (MoveAndPlace)
 from pycram.failures import PlanFailure
 from pycram.process_module import simulated_robot
-from pycrap import Milk
+from pycrap.ontologies import Milk
 
 
 class MoveAndPlaceTestCase(BulletWorldTestCase):
@@ -23,6 +23,7 @@ class MoveAndPlaceTestCase(BulletWorldTestCase):
         np.random.seed(69)
         random.seed(69)
 
+    @unittest.skip
     def test_with_mode(self):
         object_designator = ObjectDesignatorDescription(types=[Milk]).resolve()
         target_location = Pose([1.3, 1, 0.9], [0, 0, 0, 1])

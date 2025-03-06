@@ -1,8 +1,8 @@
 import numpy as np
-import tf
+from .tf_transformations import quaternion_from_euler
 from typing_extensions import Tuple, List, Union, Dict, Iterable, Optional
 
-from .datastructures.enums import Arms, Grasp
+from .datastructures.enums import Arms
 from .costmaps import Costmap
 from .datastructures.pose import Pose, Transform
 from .datastructures.world import World
@@ -10,7 +10,7 @@ from .external_interfaces.ik import request_ik
 from .failures import IKError
 from .local_transformer import LocalTransformer
 from .robot_description import RobotDescription
-from .ros.logging import logdebug
+from .ros import  logdebug
 from .world_concepts.world_object import Object
 from .world_reasoning import contact
 
@@ -98,7 +98,7 @@ class PoseGenerator:
         :return: A quaternion of the calculated orientation
         """
         angle = np.arctan2(position[1] - origin.position.y, position[0] - origin.position.x) + np.pi
-        quaternion = list(tf.transformations.quaternion_from_euler(0, 0, angle, axes="sxyz"))
+        quaternion = list(quaternion_from_euler(0, 0, angle, axes="sxyz"))
         return quaternion
 
 
@@ -125,14 +125,14 @@ def visibility_validator(pose: Pose,
         camera_pose = robot.get_link_pose(RobotDescription.current_robot_description.get_camera_link())
         robot.set_pose(Pose([100, 100, 0], [0, 0, 0, 1]))
         ray = world.ray_test(camera_pose.position_as_list(), object_or_pose.get_position_as_list())
-        res = ray == object_or_pose.id
+        res = ray.obj_id == object_or_pose.id
     else:
         robot.set_pose(pose)
         camera_pose = robot.get_link_pose(RobotDescription.current_robot_description.get_camera_link())
         robot.set_pose(Pose([100, 100, 0], [0, 0, 0, 1]))
         # TODO: Check if this is correct
         ray = world.ray_test(camera_pose.position_as_list(), object_or_pose)
-        res = ray == -1
+        res = not ray.intersected
     robot.set_pose(robot_pose)
     return res
 
@@ -191,6 +191,8 @@ def reachability_validator(pose: Pose,
     # TODO Make orientation adhere to grasping orientation
     res = False
     arms = []
+    found_grasps = []
+    original_target = target
     for description in manipulator_descs:
         retract_target_pose = LocalTransformer().transform_pose(target, robot.get_link_tf_frame(
             description.end_effector.tool_frame))

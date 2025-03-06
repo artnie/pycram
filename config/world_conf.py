@@ -1,9 +1,11 @@
 import math
 import os
 
-from typing_extensions import Tuple, Type
-from pycram.description import ObjectDescription
-from pycram.object_descriptors.urdf import ObjectDescription as URDF
+import yaml
+from typing_extensions import Tuple, Type, Dict, Optional
+from ..description import ObjectDescription
+from ..object_descriptors.urdf import ObjectDescription as URDF
+from ..utils import classproperty
 
 
 class WorldConfig:
@@ -12,9 +14,7 @@ class WorldConfig:
     A class to store the configuration of the world, this can be inherited to create a new configuration class for a
     specific world (e.g. multiverse has MultiverseConfig which inherits from this class).
     """
-
-    resources_path = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'resources')
-    resources_path = os.path.abspath(resources_path)
+    resources_path = os.path.realpath(os.path.join(os.path.dirname(__file__), '..', 'resources'))
     """
     Global reference for the resources path, this is used to search for the description files of the robot and
      the objects.
@@ -70,10 +70,10 @@ class WorldConfig:
      and the world synchronization.
     """
 
-    position_tolerance: float = 1e-2
+    position_tolerance: float = 1e-3
     orientation_tolerance: float = 10 * math.pi / 180
     prismatic_joint_position_tolerance: float = 1e-2
-    revolute_joint_position_tolerance: float = 5 * math.pi / 180
+    revolute_joint_position_tolerance: float = 2 * math.pi / 180
     """
     The acceptable error for the position and orientation of an object/link, and the joint positions.
     """
@@ -108,6 +108,23 @@ class WorldConfig:
     """
     Whether the depth images produced by :meth:`datastructures.world.World.get_images_for_target` are in meters.
     """
+
+    max_batch_size_for_rays: Optional[int] = 16380
+    """
+    The maximum batch size for the rays when using the ray test batch.
+    """
+
+    @classproperty
+    def default_camera_config(cls) -> Dict:
+        """
+        The default camera configuration for the world.
+
+        :return: The configuration for the camera as pose, yaw, tilt
+        """
+        if os.path.exists(os.path.join(os.path.dirname(__file__), 'camera.yaml')):
+            with open(os.path.join(os.path.dirname(__file__), 'camera.yaml'), 'r') as f:
+                return yaml.load(f, Loader=yaml.SafeLoader)
+        return {'target_position': [1, 2, 3], 'yaw': 50, 'pitch': -35, "dist": 1.5}
 
     @classmethod
     def get_pose_tolerance(cls) -> Tuple[float, float]:

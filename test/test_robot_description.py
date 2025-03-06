@@ -2,7 +2,7 @@ import pathlib
 import unittest
 from pycram.robot_description import RobotDescription, KinematicChainDescription, EndEffectorDescription, \
     CameraDescription, RobotDescriptionManager
-from pycram.datastructures.enums import Arms, GripperState
+from pycram.datastructures.enums import Arms, GripperState, StaticJointState
 from pycram.object_descriptors.urdf import ObjectDescription as URDF
 
 
@@ -88,15 +88,15 @@ class TestRobotDescription(unittest.TestCase):
     def test_kinematic_chain_description_add_static_joint_states(self):
         chain = KinematicChainDescription("left", "torso_lift_link", "l_wrist_roll_link", self.urdf_obj,
                                           arm_type=Arms.LEFT)
-        chain.add_static_joint_states("park", {'l_shoulder_pan_joint': 1.712,
+        chain.add_static_joint_states(StaticJointState.Park, {'l_shoulder_pan_joint': 1.712,
                                                'l_shoulder_lift_joint': -0.264,
                                                'l_upper_arm_roll_joint': 1.38,
                                                'l_elbow_flex_joint': -2.12,
                                                'l_forearm_roll_joint': 16.996,
                                                'l_wrist_flex_joint': -0.073,
                                                'l_wrist_roll_joint': 0.0})
-        self.assertTrue("park" in chain.static_joint_states)
-        self.assertEqual(chain.static_joint_states["park"], {'l_shoulder_pan_joint': 1.712,
+        self.assertTrue(StaticJointState.Park in chain.static_joint_states)
+        self.assertEqual(chain.static_joint_states[StaticJointState.Park], {'l_shoulder_pan_joint': 1.712,
                                                              'l_shoulder_lift_joint': -0.264,
                                                              'l_upper_arm_roll_joint': 1.38,
                                                              'l_elbow_flex_joint': -2.12,
@@ -186,11 +186,9 @@ class TestRobotDescription(unittest.TestCase):
         self.assertTrue(robot_description in rdm.descriptions.values())
 
     def test_load_robot_description(self):
-        robot_description = RobotDescription("pr2_test2", "base_link", "torso_lift_link", "torso_lift_joint", self.path)
         rdm = RobotDescriptionManager()
-        rdm.register_description(robot_description)
-        rdm.load_description("pr2_test2")
-        self.assertIs(RobotDescription.current_robot_description, robot_description)
+        rdm.load_description(self.urdf_obj.name) # loads description by the name of the urdf
+        self.assertIs(RobotDescription.current_robot_description, rdm.descriptions["pr2"])
 
     def test_robot_description_turtlebot(self):
         robot_description = RobotDescription("turtlebot", "base_link", "base_link", "base_joint", self.path_turtlebot)

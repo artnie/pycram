@@ -2,8 +2,6 @@ import time
 import unittest
 import xml.etree.ElementTree as ET
 
-import rospkg
-
 from pycram.testing import BulletWorldTestCase, BulletWorldGUITestCase
 from pycram.datastructures.dataclasses import Color
 from pycram.datastructures.enums import WorldMode
@@ -12,7 +10,8 @@ from pycram.datastructures.world import UseProspectionWorld
 from pycram.object_descriptors.urdf import ObjectDescription
 from pycram.robot_description import RobotDescription
 from pycram.world_concepts.world_object import Object
-from pycrap import Milk, Robot
+from pycrap.ontologies import Milk, Robot
+from pycram.ros import get_ros_package_path
 
 fix_missing_inertial = ObjectDescription.fix_missing_inertial
 
@@ -68,9 +67,9 @@ class BulletWorldTest(BulletWorldTestCase):
         self.assertAlmostEqual(self.robot.get_joint_position("head_pan_joint"), 0.0, delta=0.01)
 
     def test_get_object_contact_points(self):
-        self.assertEqual(len(self.robot.contact_points()), 0)
+        self.assertEqual(len(self.robot.contact_points), 0)  # 8 because of robot wheels with floor
         self.milk.set_position(self.robot.get_position())
-        self.assertTrue(len(self.robot.contact_points()) > 0)
+        self.assertTrue(len(self.robot.contact_points) > 0)
 
     def test_enable_joint_force_torque_sensor(self):
         self.world.enable_joint_force_torque_sensor(self.robot, self.robot.get_joint_id("head_pan_joint"))
@@ -237,8 +236,7 @@ class BulletWorldTestGUI(BulletWorldGUITestCase):
 class XMLTester(unittest.TestCase):
 
     def setUp(self) -> None:
-        rospack = rospkg.RosPack()
-        filename = rospack.get_path('pycram') + '/resources/robots/' + 'pr2.urdf'
+        filename = get_ros_package_path('pycram') + '/resources/robots/' + 'pr2.urdf'
         with open(filename, "r") as f:
             self.urdf_string = f.read()
 

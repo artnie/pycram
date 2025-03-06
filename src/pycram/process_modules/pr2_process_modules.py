@@ -3,8 +3,8 @@ from ..datastructures.enums import GripperState, Arms, ExecutionType
 from ..datastructures.world import World
 from ..designators.motion_designator import MoveGripperMotion
 from ..process_module import ProcessModule, ProcessModuleManager
-from ..ros.data_types import Duration
-from ..ros.logging import loginfo, logwarn, logdebug
+from ..ros import  Duration
+from ..ros import  loginfo, logwarn, logdebug
 
 try:
     from pr2_controllers_msgs.msg import Pr2GripperCommandGoal, Pr2GripperCommandAction, Pr2
@@ -21,6 +21,11 @@ try:
 except ImportError:
     if Multiverse is not None:
         logwarn("Import for control_msgs for gripper in Multiverse failed")
+
+try:
+    from ..worlds import Multiverse
+except ImportError:
+    Multiverse = type(None)
 
 try:
     from pr2_controllers_msgs.msg import Pr2GripperCommandGoal, Pr2GripperCommandAction, Pr2
@@ -58,7 +63,7 @@ class Pr2MoveGripperMultiverse(ProcessModule):
 
 class Pr2MoveGripperReal(ProcessModule):
     """
-    Opens or closes the gripper of the real robot, gripper uses an action server for this instead of giskard
+    Opens or closes the gripper of the real PR2, gripper uses an action server for this instead of giskard
     """
 
     def _execute(self, designator: MoveGripperMotion):
