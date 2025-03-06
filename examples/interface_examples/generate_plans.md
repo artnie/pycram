@@ -53,10 +53,10 @@ tf = TFBroadcaster()
 
 robot_name = "pr2"
 extension = ObjectDescription.get_file_extension()
-pr2 = Object("pr2", pycrap.Robot, f"{robot_name}{extension}", pose=Pose([1, 2, 0]))
-apartment = Object("apartment", pycrap.Apartment, "apartment.urdf")
+pr2 = Object("pr2", pycrap.ontologies.Robot, f"{robot_name}{extension}", pose=Pose([1, 2, 0]))
+apartment = Object("apartment", pycrap.ontologies.Apartment, "apartment.urdf")
 
-milk = Object("milk", pycrap.Milk, "milk.stl", pose=Pose([0.5, 2.5, 1], [0, 0, 0, 1]))
+milk = Object("milk", pycrap.ontologies.Milk, "milk.stl", pose=Pose([0.5, 2.5, 1], [0, 0, 0, 1]))
 milk.color = Color(0,0,1,1)
 
 milk_desig = BelieveObject(names=["milk"])
@@ -129,13 +129,13 @@ with simulated_robot:
     ParkArmsAction([Arms.BOTH]).resolve().perform()
 ```
 
-
-
+A pop-up will appear after executing the following block. This will retrieve the generated plan for the `PickUpAction`.
 ```python
 from pycram.designators.specialized_designators.generated_plan.action_generator import generate_perform_for_action 
 
 actions = generate_perform_for_action("PickUpAction")
 ```
+
 
 ```python
 from pprint import pprint
