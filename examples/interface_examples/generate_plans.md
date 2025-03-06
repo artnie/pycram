@@ -67,7 +67,6 @@ apartment_desig = BelieveObject(names=["apartment"])
 
 with simulated_robot:
     start_pose = Pose([1.3, 2.7, 0], [0, 0, 1, 0])
-    milk_target_pose = Pose([5.34, 3.55, 0.8])
 
     NavigateAction([start_pose]).resolve().perform()
     ParkArmsAction([Arms.BOTH]).resolve().perform()
@@ -105,6 +104,7 @@ with simulated_robot:
 # Find a suitable base pose to put the milk to the target position.
     
 with simulated_robot:
+    milk_target_pose = Pose([5.34, 3.55, 0.8])
     try:
         place_loc = CostmapLocation(
             target=milk_target_pose,
@@ -127,4 +127,17 @@ with simulated_robot:
     NavigateAction([close_fridge_base_location.pose]).resolve().perform()
     CloseAction(handle_designator, [Arms.LEFT]).resolve().perform()
     ParkArmsAction([Arms.BOTH]).resolve().perform()
+```
+
+
+
+```python
+from pycram.designators.specialized_designators.generated_plan.action_generator import generate_perform_for_action 
+
+actions = generate_perform_for_action("PickUpAction")
+```
+
+```python
+from pprint import pprint
+pprint(actions)
 ```

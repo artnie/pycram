@@ -1,3 +1,4 @@
+from pycram.designators.specialized_designators.generated_plan.action_generator import CodeGenerator
 
 @dataclass
 class GeneratedActionPerformable(TransportActionPerformable):
