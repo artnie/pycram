@@ -141,3 +141,14 @@ actions = generate_perform_for_action("PickUpAction")
 from pprint import pprint
 pprint(actions)
 ```
+
+
+```python
+with simulated_robot:
+    for expr in actions:
+        print(expr)
+        try:
+            exec(expr)
+        except Exception as e:
+            print(e)
+```
